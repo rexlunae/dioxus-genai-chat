@@ -1,6 +1,6 @@
 use dioxus::prelude::*;
 use dioxus_bulma::prelude::*;
-use genai::chat::{ChatMessage as GenAiChatMessage, ChatRequest};
+use genai::chat::{ChatMessage as GenAiChatMessage, ChatRequest, ChatRole as GenAiChatRole, ToolResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -95,12 +95,16 @@ impl ChatTranscript {
                 }
                 (ChatRole::Tool, ChatMessagePayload::Text(content))
                 | (ChatRole::Tool, ChatMessagePayload::Markdown(content)) => {
-                    messages.push(GenAiChatMessage::assistant(content.clone()));
+                    messages.push(GenAiChatMessage {
+                        role: GenAiChatRole::Tool,
+                        content: format!("Tool output: {content}").into(),
+                        options: None,
+                    });
                 }
                 (_, ChatMessagePayload::ToolResult { name, content }) => {
-                    messages.push(GenAiChatMessage::assistant(format!(
-                        "Tool result ({name}): {content}"
-                    )));
+                    messages.push(GenAiChatMessage::from(
+                        ToolResponse::new(name.clone(), content.clone()),
+                    ));
                 }
                 (_, ChatMessagePayload::ToolCall(call)) => {
                     messages.push(GenAiChatMessage::assistant(format!(
@@ -194,7 +198,7 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                                         placeholder: props.controls.placeholder.clone(),
                                         rows: 3,
                                         disabled: !props.controls.input_enabled,
-                                        readonly: true,
+                                        readonly: !props.controls.input_enabled,
                                     }
                                 }
                             }
@@ -452,7 +456,7 @@ mod tests {
         assert!(matches!(request.messages[0].role, GenAiRole::User));
         assert!(matches!(request.messages[1].role, GenAiRole::Assistant));
         assert!(matches!(request.messages[2].role, GenAiRole::Assistant));
-        assert!(matches!(request.messages[3].role, GenAiRole::Assistant));
+        assert!(matches!(request.messages[3].role, GenAiRole::Tool));
     }
 
     #[test]
