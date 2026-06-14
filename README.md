@@ -9,8 +9,8 @@
 
 ## Workspace layout
 
-- `/home/runner/work/dioxus-genai-chat/dioxus-genai-chat/rexlunae/dioxus-genai-chat/dioxus-genai-chat`: library crate
-- `/home/runner/work/dioxus-genai-chat/dioxus-genai-chat/rexlunae/dioxus-genai-chat/demo`: demo binary crate
+- `dioxus-genai-chat/`: library crate
+- `demo/`: demo binary crate
 
 ## Run tests
 
