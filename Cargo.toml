@@ -1,0 +1,3 @@
+[workspace]
+members = ["dioxus-genai-chat", "demo"]
+resolver = "2"
