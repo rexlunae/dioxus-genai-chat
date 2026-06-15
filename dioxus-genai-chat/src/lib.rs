@@ -1,3 +1,23 @@
+//! A configurable [Dioxus] + [Bulma] chat UI.
+//!
+//! The crate provides a [`ChatSurface`] component plus a small data model
+//! ([`ChatTranscript`], [`ChatMessage`], [`ChatMessagePayload`]) for rendering
+//! chat conversations, including:
+//!
+//! - chained, collapsible reasoning timelines ([`Reasoning`]),
+//! - inline message controls — buttons, selectors, toggles ([`InlineControl`]),
+//!   surfaced through [`ChatSurface`]'s `on_action` handler,
+//! - spinning status indicators, tool calls, progress, and errors.
+//!
+//! With the default `genai` feature enabled, [`ChatTranscript::to_genai_request`]
+//! converts a transcript into a [`genai`] chat request. Disable default features
+//! to build for `wasm32-unknown-unknown` (the web target), where `genai` is not
+//! available.
+//!
+//! [Dioxus]: https://dioxuslabs.com/
+//! [Bulma]: https://bulma.io/
+//! [`genai`]: https://docs.rs/genai/
+
 use dioxus::prelude::*;
 use dioxus_bulma::prelude::*;
 #[cfg(feature = "genai")]

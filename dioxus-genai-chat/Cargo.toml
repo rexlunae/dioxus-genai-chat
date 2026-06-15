@@ -2,6 +2,15 @@
 name = "dioxus-genai-chat"
 version = "0.1.0"
 edition = "2024"
+description = "A configurable Dioxus + Bulma chat UI with chained reasoning timelines, inline controls, and optional genai integration."
+authors = ["Erica Stith <rexlunae@gmail.com>"]
+license = "MIT"
+repository = "https://github.com/rexlunae/dioxus-genai-chat"
+homepage = "https://github.com/rexlunae/dioxus-genai-chat"
+documentation = "https://docs.rs/dioxus-genai-chat"
+readme = "README.md"
+keywords = ["dioxus", "chat", "ui", "genai", "llm"]
+categories = ["gui", "web-programming"]
 
 [dependencies]
 dioxus = "0.7"
