@@ -276,6 +276,87 @@ fn default_true() -> bool {
     true
 }
 
+/// The type of a [`Document`], used to pick an icon when there is no image preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocumentKind {
+    Image,
+    Pdf,
+    Text,
+    Other,
+    /// Rendered by a caller-provided handler — see [`ChatSurface`]'s
+    /// `render_document`.
+    Custom,
+}
+
+/// A document shown as a thumbnail that expands to a full view on click.
+///
+/// Built-in full views: image (`image`), PDF (`url`, with an optional `image`
+/// page preview), and text (`text`). For anything else, set `kind` to
+/// [`DocumentKind::Custom`] and provide a `render_document` handler on the
+/// [`ChatSurface`]; `data` carries an arbitrary payload for that handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    pub id: String,
+    /// Display name, e.g. "diagram.png".
+    pub name: String,
+    pub kind: DocumentKind,
+    /// Image source (URL or data URI): thumbnail + enlarged image, or a PDF page
+    /// preview.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Source URL (PDF, downloadable original, custom resource).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Inline text content shown in the expanded view (for text/code documents).
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Arbitrary payload for a custom handler to interpret.
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
+impl Document {
+    fn bare(id: impl Into<String>, name: impl Into<String>, kind: DocumentKind) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            kind,
+            image: None,
+            url: None,
+            text: None,
+            data: None,
+        }
+    }
+
+    /// An image document: the same `src` is used for the thumbnail and full view.
+    pub fn image(id: impl Into<String>, name: impl Into<String>, src: impl Into<String>) -> Self {
+        Self { image: Some(src.into()), ..Self::bare(id, name, DocumentKind::Image) }
+    }
+
+    /// A text document: shown as an icon thumbnail that expands to the content.
+    pub fn text(id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self { text: Some(content.into()), ..Self::bare(id, name, DocumentKind::Text) }
+    }
+
+    /// A PDF document. `url` points at the file; set [`Document::image`]-style
+    /// `image` too for a page preview where inline PDF rendering is unavailable.
+    pub fn pdf(id: impl Into<String>, name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self { url: Some(url.into()), ..Self::bare(id, name, DocumentKind::Pdf) }
+    }
+
+    /// A custom document rendered by a `render_document` handler. `data` is passed
+    /// through for the handler to interpret.
+    pub fn custom(id: impl Into<String>, name: impl Into<String>, data: Value) -> Self {
+        Self { data: Some(data), ..Self::bare(id, name, DocumentKind::Custom) }
+    }
+
+    /// Attach a page-preview image (e.g. for a PDF).
+    pub fn with_image(mut self, src: impl Into<String>) -> Self {
+        self.image = Some(src.into());
+        self
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -291,6 +372,8 @@ pub enum ChatMessagePayload {
     Controls(Vec<InlineControl>),
     /// A unified file diff, optionally animated as it is applied.
     Diff(FileDiff),
+    /// A gallery of document thumbnails that expand to a full view.
+    Documents(Vec<Document>),
     Typing,
     Error(String),
 }
@@ -361,6 +444,7 @@ impl ChatTranscript {
                 | (_, ChatMessagePayload::Status(_))
                 | (_, ChatMessagePayload::Controls(_))
                 | (_, ChatMessagePayload::Diff(_))
+                | (_, ChatMessagePayload::Documents(_))
                 | (_, ChatMessagePayload::Typing) => {}
             }
         }
@@ -428,6 +512,11 @@ pub struct ChatSurfaceProps {
     /// Fired when the user adds or removes context via the input area.
     #[props(default)]
     pub on_context: EventHandler<ContextEvent>,
+    /// Custom renderer for the expanded (full) view of [`DocumentKind::Custom`]
+    /// documents. Receives the [`Document`] and returns the element to show in the
+    /// lightbox. Without it, custom documents show a "no handler" placeholder.
+    #[props(default)]
+    pub render_document: Option<Callback<Document, Element>>,
 }
 
 /// Scoped styling for the compact captions and the chained reasoning timeline.
@@ -517,7 +606,28 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-diff-animate.gc-diff-added { animation: gc-diff-reveal 0.28s ease both, gc-flash-add 1.1s ease; }
 .gc-diff-animate.gc-diff-removed { animation: gc-diff-reveal 0.28s ease both, gc-flash-remove 1.1s ease; }
 
+.gc-docs { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.gc-doc-thumb { cursor: pointer; border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.5rem; background: var(--bulma-scheme-main, #fff); padding: 0; width: 7rem; overflow: hidden; display: flex; flex-direction: column; text-align: left; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+.gc-doc-thumb:hover { border-color: var(--bulma-link, #485fc7); box-shadow: 0 2px 8px rgba(10, 10, 10, 0.08); }
+.gc-doc-preview { height: 4.6rem; display: flex; align-items: center; justify-content: center; background: var(--bulma-scheme-main-bis, #f5f7fa); overflow: hidden; }
+.gc-doc-preview img { width: 100%; height: 100%; object-fit: cover; }
+.gc-doc-icon { font-size: 1.9rem; }
+.gc-doc-name { font-size: 0.72rem; padding: 0.3rem 0.4rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--bulma-text, #363636); }
+
+.gc-lightbox { position: fixed; inset: 0; background: rgba(10, 10, 10, 0.7); display: flex; align-items: center; justify-content: center; padding: 2rem; z-index: 1000; animation: gc-fade-in 0.15s ease; }
+.gc-lightbox-card { background: var(--bulma-scheme-main, #fff); border-radius: 0.6rem; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(10, 10, 10, 0.4); }
+.gc-lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--bulma-border-weak, #ededed); }
+.gc-lightbox-title { font-weight: 600; font-size: 0.9rem; color: var(--bulma-text, #363636); }
+.gc-lightbox-close { cursor: pointer; border: none; background: none; font-size: 1.4rem; line-height: 1; color: var(--bulma-text-weak, #7a7a7a); }
+.gc-lightbox-close:hover { color: var(--bulma-text, #363636); }
+.gc-lightbox-body { padding: 0.9rem; overflow: auto; }
+.gc-lightbox-body img { max-width: 100%; max-height: 75vh; display: block; margin: 0 auto; }
+.gc-lightbox-text { font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; margin: 0; }
+.gc-pdf { width: 80vw; max-width: 900px; height: 75vh; border: none; }
+.gc-doc-link { display: inline-block; margin-top: 0.6rem; font-size: 0.85rem; color: var(--bulma-link, #485fc7); }
+
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes gc-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes gc-spin { to { transform: rotate(360deg); } }
 @keyframes gc-diff-reveal { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 @keyframes gc-flash-add { 0% { background: rgba(72, 199, 142, 0.55); } 100% { background: rgba(72, 199, 142, 0.14); } }
@@ -555,6 +665,7 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                                 key: "{idx}",
                                 message: message.clone(),
                                 on_action: props.on_action,
+                                render_document: props.render_document,
                             }
                         }
 
@@ -656,6 +767,8 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
 struct ChatBubbleProps {
     message: ChatMessage,
     on_action: EventHandler<ControlEvent>,
+    #[props(default)]
+    render_document: Option<Callback<Document, Element>>,
 }
 
 #[component]
@@ -691,6 +804,9 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                     },
                     ChatMessagePayload::Diff(diff) => rsx! {
                         DiffView { diff: diff.clone() }
+                    },
+                    ChatMessagePayload::Documents(documents) => rsx! {
+                        DocumentGallery { documents: documents.clone(), render_document: props.render_document }
                     },
                     ChatMessagePayload::Typing => rsx! {
                         div {
@@ -914,6 +1030,118 @@ fn diff_sign(kind: DiffKind) -> &'static str {
     }
 }
 
+fn document_icon(kind: DocumentKind) -> &'static str {
+    match kind {
+        DocumentKind::Image => "🖼️",
+        DocumentKind::Pdf => "📕",
+        DocumentKind::Text => "📄",
+        DocumentKind::Other => "📎",
+        DocumentKind::Custom => "🧩",
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct DocumentGalleryProps {
+    documents: Vec<Document>,
+    #[props(default)]
+    render_document: Option<Callback<Document, Element>>,
+}
+
+/// A row of document thumbnails. Clicking one opens a full-view lightbox.
+///
+/// The expanded index is local view state (like a native `<details>` toggle) —
+/// it is not part of the transcript, so it lives in a signal here.
+#[component]
+fn DocumentGallery(props: DocumentGalleryProps) -> Element {
+    let mut expanded = use_signal(|| None::<usize>);
+    let documents = props.documents.clone();
+    let render_document = props.render_document;
+
+    rsx! {
+        div {
+            class: "gc-docs",
+            for (idx, doc) in documents.iter().enumerate() {
+                button {
+                    key: "{doc.id}",
+                    class: "gc-doc-thumb",
+                    title: "{doc.name}",
+                    onclick: move |_| expanded.set(Some(idx)),
+                    div {
+                        class: "gc-doc-preview",
+                        if let Some(src) = &doc.image {
+                            img { src: "{src}", alt: "{doc.name}" }
+                        } else {
+                            span { class: "gc-doc-icon", "{document_icon(doc.kind)}" }
+                        }
+                    }
+                    span { class: "gc-doc-name", "{doc.name}" }
+                }
+            }
+        }
+        if let Some(idx) = expanded() {
+            if let Some(doc) = documents.get(idx) {
+                div {
+                    class: "gc-lightbox",
+                    onclick: move |_| expanded.set(None),
+                    div {
+                        class: "gc-lightbox-card",
+                        onclick: move |e| e.stop_propagation(),
+                        div {
+                            class: "gc-lightbox-head",
+                            span { class: "gc-lightbox-title", "{doc.name}" }
+                            button {
+                                class: "gc-lightbox-close",
+                                title: "Close",
+                                onclick: move |_| expanded.set(None),
+                                "×"
+                            }
+                        }
+                        div {
+                            class: "gc-lightbox-body",
+                            if doc.kind == DocumentKind::Custom {
+                                if let Some(cb) = render_document {
+                                    {cb.call(doc.clone())}
+                                } else {
+                                    p { class: "gc-muted", "No handler registered for this document." }
+                                }
+                            } else if doc.kind == DocumentKind::Pdf {
+                                if let Some(src) = &doc.image {
+                                    img { src: "{src}", alt: "{doc.name}" }
+                                } else if let Some(url) = &doc.url {
+                                    iframe { class: "gc-pdf", src: "{url}", title: "{doc.name}" }
+                                }
+                                if let Some(url) = &doc.url {
+                                    a {
+                                        class: "gc-doc-link",
+                                        href: "{url}",
+                                        target: "_blank",
+                                        rel: "noopener",
+                                        "Open original ↗"
+                                    }
+                                }
+                            } else if let Some(src) = &doc.image {
+                                img { src: "{src}", alt: "{doc.name}" }
+                            } else if let Some(text) = &doc.text {
+                                pre { class: "gc-lightbox-text", "{text}" }
+                            } else if let Some(url) = &doc.url {
+                                a {
+                                    class: "gc-doc-link",
+                                    href: "{url}",
+                                    target: "_blank",
+                                    rel: "noopener",
+                                    "Open ↗"
+                                }
+                            } else {
+                                p { class: "gc-muted", "No preview available." }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct ReasoningPanelProps {
     reasoning: Reasoning,
@@ -1082,6 +1310,29 @@ pub fn sample_transcript() -> ChatTranscript {
                 DiffLine::context("}"),
             ],
         }),
+    );
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::Documents(vec![
+            Document::image(
+                "doc-diagram",
+                "diagram.svg",
+                "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMTIwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iIzQ4NWZjNyIvPjxjaXJjbGUgY3g9IjgwIiBjeT0iNTUiIHI9IjI4IiBmaWxsPSIjZmZkNTdlIi8+PHJlY3QgeT0iOTIiIHdpZHRoPSIxNjAiIGhlaWdodD0iMjgiIGZpbGw9IiMzYTRmYjAiLz48dGV4dCB4PSI4MCIgeT0iMTExIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+ZGlhZ3JhbS5zdmc8L3RleHQ+PC9zdmc+",
+            ),
+            Document::text(
+                "doc-report",
+                "report.md",
+                "# Telemetry report\n\n- Error rate: 0.14 (was 0.20)\n- Latency p95: stable\n- Window: last 24h",
+            ),
+            Document::pdf("doc-pdf", "report.pdf", "https://example.com/report.pdf").with_image(
+                "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMjAwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2ZmZiIgc3Ryb2tlPSIjZGJkYmRiIi8+PHJlY3QgeD0iMTYiIHk9IjIwIiB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyIiBmaWxsPSIjZjE0NjY4Ii8+PHJlY3QgeD0iMTYiIHk9IjQ4IiB3aWR0aD0iMTI4IiBoZWlnaHQ9IjgiIGZpbGw9IiNkYmRiZGIiLz48cmVjdCB4PSIxNiIgeT0iNjQiIHdpZHRoPSIxMTAiIGhlaWdodD0iOCIgZmlsbD0iI2RiZGJkYiIvPjxyZWN0IHg9IjE2IiB5PSI4MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSI4IiBmaWxsPSIjZGJkYmRiIi8+PHRleHQgeD0iODAiIHk9IjE3MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiNmMTQ2NjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBERjwvdGV4dD48L3N2Zz4=",
+            ),
+            Document::custom(
+                "doc-loc",
+                "location.geo",
+                serde_json::json!({ "coords": "47.6062° N, 122.3321° W" }),
+            ),
+        ]),
     );
     transcript.push(
         ChatRole::Assistant,

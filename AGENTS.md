@@ -67,9 +67,13 @@ The match arms are exhaustive (no catch-all), so a new variant requires updating
 
 ### Controlled components (no internal state)
 
-Interactive widgets do not own their state — they render from props and emit
-events; the consumer mutates the source data and passes it back. Keep it that
-way; don't add internal mutable state.
+Interactive widgets do not own their *data* state — they render from props and
+emit events; the consumer mutates the source data and passes it back. Keep it
+that way; don't put transcript/attachment data in internal signals.
+
+Purely *ephemeral view state* (a lightbox being open, a `<details>` collapse) is
+fine to keep in a local signal — it is not conversation data. Example:
+`DocumentGallery` holds the expanded-thumbnail index in a `use_signal`.
 
 - `InlineControl` (Button/Select/Toggle) → `on_action: EventHandler<ControlEvent>`;
   consumer updates the transcript.
@@ -78,6 +82,12 @@ way; don't add internal mutable state.
   does the actual file/dir picking (native dialog, browser input, typed path —
   the library deliberately has no file-dialog dependency). Enable via
   `ChatControls::allow_file_attachments` / `allow_directory_context`.
+- Documents (`Document`/`DocumentKind`) → built-in full views for image, PDF
+  (`url` + optional `image` page preview; inline render via `<iframe>`), and
+  text. For `DocumentKind::Custom`, the consumer supplies
+  `render_document: Callback<Document, Element>` and reads `Document::data`
+  (arbitrary JSON) to render the expanded view. Note PDFs may not render inline
+  in every webview (e.g. webkit2gtk) — provide a page-preview `image` for those.
 
 ### Styling
 
