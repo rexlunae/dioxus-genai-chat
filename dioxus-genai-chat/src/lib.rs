@@ -212,6 +212,11 @@ impl ContextItem {
     pub fn directory(id: impl Into<String>, label: impl Into<String>) -> Self {
         Self { id: id.into(), label: label.into(), kind: ContextKind::Directory }
     }
+
+    /// A file context item derived from a [`Document`] (id and name carried over).
+    pub fn from_document(doc: &Document) -> Self {
+        Self::file(doc.id.clone(), doc.name.clone())
+    }
 }
 
 /// Emitted when the user adds or removes context via the input area.
@@ -357,6 +362,19 @@ impl Document {
     }
 }
 
+/// Emitted when the user acts on documents in a gallery.
+///
+/// Handle this in [`ChatSurface`]'s `on_document`. Document selection requires
+/// `ChatControls::allow_document_selection`; downloads use a native link and do
+/// not emit an event.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DocumentEvent {
+    /// The user selected one or more documents and asked to add them to the chat
+    /// context. Convert them (e.g. via [`ContextItem::from_document`]) and append
+    /// to the `attachments` list.
+    AddToContext(Vec<Document>),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -473,6 +491,9 @@ pub struct ChatControls {
     pub attach_files_label: String,
     /// Label for the add-directory button.
     pub add_directory_label: String,
+    /// Show selection checkboxes on document thumbnails plus an "add to context"
+    /// bar. Off by default — enabling it requires wiring `on_document`.
+    pub allow_document_selection: bool,
 }
 
 impl Default for ChatControls {
@@ -489,6 +510,7 @@ impl Default for ChatControls {
             allow_directory_context: false,
             attach_files_label: "📎 Add files".to_string(),
             add_directory_label: "📁 Add folder".to_string(),
+            allow_document_selection: false,
         }
     }
 }
@@ -517,6 +539,10 @@ pub struct ChatSurfaceProps {
     /// lightbox. Without it, custom documents show a "no handler" placeholder.
     #[props(default)]
     pub render_document: Option<Callback<Document, Element>>,
+    /// Fired when the user adds selected documents to the context. Requires
+    /// `ChatControls::allow_document_selection`.
+    #[props(default)]
+    pub on_document: EventHandler<DocumentEvent>,
 }
 
 /// Scoped styling for the compact captions and the chained reasoning timeline.
@@ -606,9 +632,13 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-diff-animate.gc-diff-added { animation: gc-diff-reveal 0.28s ease both, gc-flash-add 1.1s ease; }
 .gc-diff-animate.gc-diff-removed { animation: gc-diff-reveal 0.28s ease both, gc-flash-remove 1.1s ease; }
 
+.gc-doc-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; font-size: 0.8rem; color: var(--bulma-text-weak, #7a7a7a); }
 .gc-docs { display: flex; flex-wrap: wrap; gap: 0.5rem; }
-.gc-doc-thumb { cursor: pointer; border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.5rem; background: var(--bulma-scheme-main, #fff); padding: 0; width: 7rem; overflow: hidden; display: flex; flex-direction: column; text-align: left; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
-.gc-doc-thumb:hover { border-color: var(--bulma-link, #485fc7); box-shadow: 0 2px 8px rgba(10, 10, 10, 0.08); }
+.gc-doc { position: relative; border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.5rem; overflow: hidden; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+.gc-doc.gc-selected { border-color: var(--bulma-link, #485fc7); box-shadow: 0 0 0 2px rgba(72, 95, 199, 0.25); }
+.gc-doc-select { position: absolute; top: 0.35rem; left: 0.35rem; z-index: 2; width: 1rem; height: 1rem; cursor: pointer; }
+.gc-doc-thumb { cursor: pointer; border: none; background: var(--bulma-scheme-main, #fff); padding: 0; width: 7rem; overflow: hidden; display: flex; flex-direction: column; text-align: left; }
+.gc-doc:hover { border-color: var(--bulma-link, #485fc7); box-shadow: 0 2px 8px rgba(10, 10, 10, 0.08); }
 .gc-doc-preview { height: 4.6rem; display: flex; align-items: center; justify-content: center; background: var(--bulma-scheme-main-bis, #f5f7fa); overflow: hidden; }
 .gc-doc-preview img { width: 100%; height: 100%; object-fit: cover; }
 .gc-doc-icon { font-size: 1.9rem; }
@@ -618,6 +648,8 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-lightbox-card { background: var(--bulma-scheme-main, #fff); border-radius: 0.6rem; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(10, 10, 10, 0.4); }
 .gc-lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--bulma-border-weak, #ededed); }
 .gc-lightbox-title { font-weight: 600; font-size: 0.9rem; color: var(--bulma-text, #363636); }
+.gc-lightbox-actions { display: flex; align-items: center; gap: 0.75rem; flex: none; }
+.gc-lightbox-download { font-size: 0.82rem; color: var(--bulma-link, #485fc7); white-space: nowrap; }
 .gc-lightbox-close { cursor: pointer; border: none; background: none; font-size: 1.4rem; line-height: 1; color: var(--bulma-text-weak, #7a7a7a); }
 .gc-lightbox-close:hover { color: var(--bulma-text, #363636); }
 .gc-lightbox-body { padding: 0.9rem; overflow: auto; }
@@ -666,6 +698,8 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                                 message: message.clone(),
                                 on_action: props.on_action,
                                 render_document: props.render_document,
+                                on_document: props.on_document,
+                                document_selectable: props.controls.allow_document_selection,
                             }
                         }
 
@@ -769,6 +803,10 @@ struct ChatBubbleProps {
     on_action: EventHandler<ControlEvent>,
     #[props(default)]
     render_document: Option<Callback<Document, Element>>,
+    #[props(default)]
+    on_document: EventHandler<DocumentEvent>,
+    #[props(default)]
+    document_selectable: bool,
 }
 
 #[component]
@@ -806,7 +844,12 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                         DiffView { diff: diff.clone() }
                     },
                     ChatMessagePayload::Documents(documents) => rsx! {
-                        DocumentGallery { documents: documents.clone(), render_document: props.render_document }
+                        DocumentGallery {
+                            documents: documents.clone(),
+                            render_document: props.render_document,
+                            on_document: props.on_document,
+                            selectable: props.document_selectable,
+                        }
                     },
                     ChatMessagePayload::Typing => rsx! {
                         div {
@@ -1040,41 +1083,126 @@ fn document_icon(kind: DocumentKind) -> &'static str {
     }
 }
 
+/// Percent-encode text into a `data:` URI so it can be downloaded via `<a download>`.
+fn text_data_uri(text: &str) -> String {
+    let mut out = String::from("data:text/plain;charset=utf-8,");
+    for &b in text.as_bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
+            out.push(char::from_digit((b & 0x0f) as u32, 16).unwrap().to_ascii_uppercase());
+        }
+    }
+    out
+}
+
+/// Resolve a downloadable source for a document, if any.
+fn download_href(doc: &Document) -> Option<String> {
+    if let Some(url) = &doc.url {
+        Some(url.clone())
+    } else if let Some(image) = &doc.image {
+        Some(image.clone())
+    } else {
+        doc.text.as_deref().map(text_data_uri)
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct DocumentGalleryProps {
     documents: Vec<Document>,
     #[props(default)]
     render_document: Option<Callback<Document, Element>>,
+    #[props(default)]
+    on_document: EventHandler<DocumentEvent>,
+    #[props(default)]
+    selectable: bool,
 }
 
-/// A row of document thumbnails. Clicking one opens a full-view lightbox.
+/// A row of document thumbnails. Clicking one opens a full-view lightbox with a
+/// download button; with `selectable`, thumbnails get checkboxes and an
+/// "add to context" bar.
 ///
-/// The expanded index is local view state (like a native `<details>` toggle) —
-/// it is not part of the transcript, so it lives in a signal here.
+/// The expanded index and selection set are local view state (like a native
+/// `<details>` toggle) — not part of the transcript — so they live in signals.
 #[component]
 fn DocumentGallery(props: DocumentGalleryProps) -> Element {
     let mut expanded = use_signal(|| None::<usize>);
+    let mut selected = use_signal(std::collections::HashSet::<String>::new);
     let documents = props.documents.clone();
     let render_document = props.render_document;
+    let on_document = props.on_document;
+    let selectable = props.selectable;
+
+    let selected_count = selected.read().len();
 
     rsx! {
+        if selectable && selected_count > 0 {
+            div {
+                class: "gc-doc-bar",
+                span { "{selected_count} selected" }
+                button {
+                    class: "button is-small is-primary",
+                    onclick: {
+                        let documents = documents.clone();
+                        move |_| {
+                            let sel = selected.read();
+                            let chosen: Vec<Document> =
+                                documents.iter().filter(|d| sel.contains(&d.id)).cloned().collect();
+                            drop(sel);
+                            on_document.call(DocumentEvent::AddToContext(chosen));
+                            selected.write().clear();
+                        }
+                    },
+                    "➕ Add to context"
+                }
+                button {
+                    class: "button is-small is-light",
+                    onclick: move |_| selected.write().clear(),
+                    "Clear"
+                }
+            }
+        }
         div {
             class: "gc-docs",
             for (idx, doc) in documents.iter().enumerate() {
-                button {
+                div {
                     key: "{doc.id}",
-                    class: "gc-doc-thumb",
-                    title: "{doc.name}",
-                    onclick: move |_| expanded.set(Some(idx)),
-                    div {
-                        class: "gc-doc-preview",
-                        if let Some(src) = &doc.image {
-                            img { src: "{src}", alt: "{doc.name}" }
-                        } else {
-                            span { class: "gc-doc-icon", "{document_icon(doc.kind)}" }
+                    class: if selected.read().contains(&doc.id) { "gc-doc gc-selected" } else { "gc-doc" },
+                    if selectable {
+                        input {
+                            r#type: "checkbox",
+                            class: "gc-doc-select",
+                            checked: selected.read().contains(&doc.id),
+                            onclick: move |e| e.stop_propagation(),
+                            onchange: {
+                                let id = doc.id.clone();
+                                move |e: FormEvent| {
+                                    let mut sel = selected.write();
+                                    if e.checked() {
+                                        sel.insert(id.clone());
+                                    } else {
+                                        sel.remove(&id);
+                                    }
+                                }
+                            },
                         }
                     }
-                    span { class: "gc-doc-name", "{doc.name}" }
+                    button {
+                        class: "gc-doc-thumb",
+                        title: "{doc.name}",
+                        onclick: move |_| expanded.set(Some(idx)),
+                        div {
+                            class: "gc-doc-preview",
+                            if let Some(src) = &doc.image {
+                                img { src: "{src}", alt: "{doc.name}" }
+                            } else {
+                                span { class: "gc-doc-icon", "{document_icon(doc.kind)}" }
+                            }
+                        }
+                        span { class: "gc-doc-name", "{doc.name}" }
+                    }
                 }
             }
         }
@@ -1089,11 +1217,23 @@ fn DocumentGallery(props: DocumentGalleryProps) -> Element {
                         div {
                             class: "gc-lightbox-head",
                             span { class: "gc-lightbox-title", "{doc.name}" }
-                            button {
-                                class: "gc-lightbox-close",
-                                title: "Close",
-                                onclick: move |_| expanded.set(None),
-                                "×"
+                            div {
+                                class: "gc-lightbox-actions",
+                                if let Some(href) = download_href(doc) {
+                                    a {
+                                        class: "gc-lightbox-download",
+                                        href: "{href}",
+                                        download: "{doc.name}",
+                                        title: "Download",
+                                        "⤓ Download"
+                                    }
+                                }
+                                button {
+                                    class: "gc-lightbox-close",
+                                    title: "Close",
+                                    onclick: move |_| expanded.set(None),
+                                    "×"
+                                }
                             }
                         }
                         div {
