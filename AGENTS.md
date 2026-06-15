@@ -62,7 +62,7 @@ The match arms are exhaustive (no catch-all), so a new variant requires updating
 
 1. `ChatTranscript::to_genai_request` (in `lib.rs`) — map it to a genai message,
    or add it to the ignore arm if it is ephemeral UI (progress / reasoning /
-   status / controls / typing are ignored — they are not sent to the model).
+   status / controls / diff / typing are ignored — they are not sent to the model).
 2. `ChatBubble` (in `lib.rs`) — render it.
 
 ### Controlled components (no internal state)
