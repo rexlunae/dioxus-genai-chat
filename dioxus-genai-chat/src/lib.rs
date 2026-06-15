@@ -90,6 +90,78 @@ pub struct Reasoning {
     pub collapsed: bool,
 }
 
+/// Visual emphasis for an inline control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ControlStyle {
+    Primary,
+    #[default]
+    Neutral,
+    Danger,
+    Ghost,
+}
+
+/// An option in an inline [`InlineControl::Select`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SelectOption {
+    pub value: String,
+    pub label: String,
+}
+
+impl SelectOption {
+    pub fn new(value: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { value: value.into(), label: label.into() }
+    }
+}
+
+/// A small interactive element rendered inline inside a message.
+///
+/// Interactions are surfaced through the [`ChatSurface`] `on_action` handler;
+/// the component is "controlled", so update the transcript in response to events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum InlineControl {
+    Button {
+        id: String,
+        label: String,
+        #[serde(default)]
+        style: ControlStyle,
+        #[serde(default)]
+        disabled: bool,
+    },
+    Select {
+        id: String,
+        #[serde(default)]
+        label: Option<String>,
+        options: Vec<SelectOption>,
+        #[serde(default)]
+        selected: Option<String>,
+    },
+    Toggle {
+        id: String,
+        label: String,
+        #[serde(default)]
+        value: bool,
+    },
+}
+
+/// The kind of interaction that produced a [`ControlEvent`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum ControlValue {
+    /// A button was clicked.
+    Clicked,
+    /// A select changed to the given option value.
+    Selected(String),
+    /// A toggle changed to the given state.
+    Toggled(bool),
+}
+
+/// Emitted when the user interacts with an [`InlineControl`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ControlEvent {
+    /// The `id` of the control that was interacted with.
+    pub id: String,
+    pub value: ControlValue,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -99,6 +171,10 @@ pub enum ChatMessagePayload {
     ToolCall(ToolCall),
     ToolResult { name: String, content: String },
     Progress(ProgressState),
+    /// A spinning status line with a custom label (e.g. "Running tests…").
+    Status(String),
+    /// A row of inline controls (buttons / selectors / toggles).
+    Controls(Vec<InlineControl>),
     Typing,
     Error(String),
 }
@@ -166,6 +242,8 @@ impl ChatTranscript {
                 }
                 (_, ChatMessagePayload::Progress(_))
                 | (_, ChatMessagePayload::Reasoning(_))
+                | (_, ChatMessagePayload::Status(_))
+                | (_, ChatMessagePayload::Controls(_))
                 | (_, ChatMessagePayload::Typing) => {}
             }
         }
@@ -210,6 +288,9 @@ pub struct ChatSurfaceProps {
     pub title: Option<String>,
     #[props(default)]
     pub theme: Option<BulmaTheme>,
+    /// Fired when the user interacts with an inline [`InlineControl`].
+    #[props(default)]
+    pub on_action: EventHandler<ControlEvent>,
 }
 
 /// Scoped styling for the compact captions and the chained reasoning timeline.
@@ -257,7 +338,18 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-step-pending .gc-step-title { color: var(--bulma-text-weak, #7a7a7a); }
 .gc-step-detail { font-size: 0.75rem; color: var(--bulma-text-weak, #7a7a7a); }
 
+.gc-status { display: flex; align-items: center; gap: 0.5rem; color: var(--bulma-text-weak, #7a7a7a); font-size: 0.85rem; }
+.gc-spinner { width: 0.95rem; height: 0.95rem; border: 2px solid currentColor; border-top-color: transparent; border-radius: 50%; display: inline-block; flex: none; animation: gc-spin 0.7s linear infinite; }
+.gc-spinner-sm { width: 0.75rem; height: 0.75rem; border-width: 2px; }
+.gc-step-active .gc-step-marker .gc-spinner { color: var(--bulma-info, #3e8ed0); }
+
+.gc-controls { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+.gc-control-group { display: inline-flex; align-items: center; gap: 0.35rem; }
+.gc-control-label { font-size: 0.78rem; color: var(--bulma-text-weak, #7a7a7a); }
+.gc-toggle { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; }
+
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes gc-spin { to { transform: rotate(360deg); } }
 "#;
 
 #[component]
@@ -287,6 +379,7 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                             ChatBubble {
                                 key: "{idx}",
                                 message: message.clone(),
+                                on_action: props.on_action,
                             }
                         }
 
@@ -343,6 +436,7 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
 #[derive(Props, Clone, PartialEq)]
 struct ChatBubbleProps {
     message: ChatMessage,
+    on_action: EventHandler<ControlEvent>,
 }
 
 #[component]
@@ -366,8 +460,22 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                     ChatMessagePayload::Reasoning(reasoning) => rsx! {
                         ReasoningPanel { reasoning: reasoning.clone() }
                     },
+                    ChatMessagePayload::Status(label) => rsx! {
+                        div {
+                            class: "gc-status",
+                            span { class: "gc-spinner" }
+                            span { "{label}" }
+                        }
+                    },
+                    ChatMessagePayload::Controls(controls) => rsx! {
+                        ControlBar { controls: controls.clone(), on_action: props.on_action }
+                    },
                     ChatMessagePayload::Typing => rsx! {
-                        p { class: "gc-muted", "Thinking…" }
+                        div {
+                            class: "gc-status",
+                            span { class: "gc-spinner" }
+                            span { "Thinking…" }
+                        }
                     },
                     ChatMessagePayload::Error(content) => rsx! {
                         p { class: "has-text-danger has-text-weight-semibold", "{content}" }
@@ -386,11 +494,15 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                     ChatMessagePayload::ToolCall(call) => {
                         let args = serde_json::to_string_pretty(&call.arguments)
                             .unwrap_or_else(|_| call.arguments.to_string());
+                        let running = matches!(call.status, ToolCallStatus::Running);
                         rsx! {
                             div {
                                 div {
                                     class: "gc-tool-line",
                                     span { class: "gc-tool-name", "{call.name}" }
+                                    if running {
+                                        span { class: "gc-spinner gc-spinner-sm" }
+                                    }
                                     span {
                                         class: "gc-chip gc-chip-{step_slug(tool_step_status(&call.status))}",
                                         "{call.status.as_label()}"
@@ -413,6 +525,99 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                 }}
             }
         }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ControlBarProps {
+    controls: Vec<InlineControl>,
+    on_action: EventHandler<ControlEvent>,
+}
+
+/// A row of small inline controls (buttons, selectors, toggles).
+#[component]
+fn ControlBar(props: ControlBarProps) -> Element {
+    let on_action = props.on_action;
+
+    rsx! {
+        div {
+            class: "gc-controls",
+            for (idx, control) in props.controls.iter().enumerate() {
+                {match control {
+                    InlineControl::Button { id, label, style, disabled } => {
+                        let id = id.clone();
+                        rsx! {
+                            button {
+                                key: "{idx}",
+                                class: "button is-small {control_style_class(*style)}",
+                                disabled: *disabled,
+                                onclick: move |_| on_action.call(ControlEvent {
+                                    id: id.clone(),
+                                    value: ControlValue::Clicked,
+                                }),
+                                "{label}"
+                            }
+                        }
+                    }
+                    InlineControl::Select { id, label, options, selected } => {
+                        let id = id.clone();
+                        rsx! {
+                            div {
+                                key: "{idx}",
+                                class: "gc-control-group",
+                                if let Some(label) = label {
+                                    span { class: "gc-control-label", "{label}" }
+                                }
+                                div {
+                                    class: "select is-small",
+                                    select {
+                                        onchange: move |evt| on_action.call(ControlEvent {
+                                            id: id.clone(),
+                                            value: ControlValue::Selected(evt.value()),
+                                        }),
+                                        for opt in options.iter() {
+                                            option {
+                                                key: "{opt.value}",
+                                                value: "{opt.value}",
+                                                selected: selected.as_deref() == Some(opt.value.as_str()),
+                                                "{opt.label}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    InlineControl::Toggle { id, label, value } => {
+                        let id = id.clone();
+                        rsx! {
+                            label {
+                                key: "{idx}",
+                                class: "checkbox gc-toggle",
+                                input {
+                                    r#type: "checkbox",
+                                    checked: *value,
+                                    onchange: move |evt| on_action.call(ControlEvent {
+                                        id: id.clone(),
+                                        value: ControlValue::Toggled(evt.checked()),
+                                    }),
+                                }
+                                span { "{label}" }
+                            }
+                        }
+                    }
+                }}
+            }
+        }
+    }
+}
+
+fn control_style_class(style: ControlStyle) -> &'static str {
+    match style {
+        ControlStyle::Primary => "is-primary",
+        ControlStyle::Neutral => "",
+        ControlStyle::Danger => "is-danger is-light",
+        ControlStyle::Ghost => "is-ghost",
     }
 }
 
@@ -441,7 +646,14 @@ fn ReasoningPanel(props: ReasoningPanelProps) -> Element {
                     li {
                         key: "{idx}",
                         class: "gc-step gc-step-{step_slug(step.status)}",
-                        span { class: "gc-step-marker", "{step_marker(step.status)}" }
+                        span {
+                            class: "gc-step-marker",
+                            if step.status == StepStatus::Active {
+                                span { class: "gc-spinner gc-spinner-sm" }
+                            } else {
+                                "{step_marker(step.status)}"
+                            }
+                        }
                         div {
                             class: "gc-step-content",
                             span { class: "gc-step-title", "{step.title}" }
@@ -549,10 +761,46 @@ pub fn sample_transcript() -> ChatTranscript {
         },
     );
     transcript.push(
+        ChatRole::Tool,
+        ChatMessagePayload::Status("Generating summary…".to_string()),
+    );
+    transcript.push(
         ChatRole::Assistant,
         ChatMessagePayload::Markdown(
             "### Summary\n- Error rate improved by **14%**\n- Latency remained stable".to_string(),
         ),
+    );
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::Controls(vec![
+            InlineControl::Button {
+                id: "accept".to_string(),
+                label: "Keep summary".to_string(),
+                style: ControlStyle::Primary,
+                disabled: false,
+            },
+            InlineControl::Button {
+                id: "retry".to_string(),
+                label: "Regenerate".to_string(),
+                style: ControlStyle::Neutral,
+                disabled: false,
+            },
+            InlineControl::Select {
+                id: "detail".to_string(),
+                label: Some("Detail".to_string()),
+                options: vec![
+                    SelectOption::new("brief", "Brief"),
+                    SelectOption::new("normal", "Normal"),
+                    SelectOption::new("verbose", "Verbose"),
+                ],
+                selected: Some("normal".to_string()),
+            },
+            InlineControl::Toggle {
+                id: "cite_sources".to_string(),
+                label: "Cite sources".to_string(),
+                value: true,
+            },
+        ]),
     );
 
     transcript
