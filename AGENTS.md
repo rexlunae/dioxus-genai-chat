@@ -88,6 +88,12 @@ fine to keep in a local signal — it is not conversation data. Example:
   `render_document: Callback<Document, Element>` and reads `Document::data`
   (arbitrary JSON) to render the expanded view. Note PDFs may not render inline
   in every webview (e.g. webkit2gtk) — provide a page-preview `image` for those.
+  The lightbox download button is a native `<a download>` (no event/FS dep).
+  Multi-select → enable `ChatControls::allow_document_selection`; selecting
+  thumbnails and clicking "add to context" fires
+  `on_document: EventHandler<DocumentEvent>` (`AddToContext(Vec<Document>)`); the
+  consumer converts (e.g. `ContextItem::from_document`) and appends to
+  `attachments`. Selection set is local view state (a signal in the gallery).
 
 ### Styling
 

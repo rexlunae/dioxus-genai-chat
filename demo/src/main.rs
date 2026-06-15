@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use dioxus_genai_chat::{
     ChatControls, ChatSurface, ContextEvent, ContextItem, ControlEvent, ControlValue,
-    sample_transcript,
+    DocumentEvent, sample_transcript,
 };
 
 fn main() {
@@ -15,10 +15,11 @@ fn App() -> Element {
     let mut attachments = use_signal(Vec::<ContextItem>::new);
     let mut next_id = use_signal(|| 0u32);
 
-    // Enable the file/directory affordances (off by default).
+    // Enable the file/directory affordances and document selection (off by default).
     let controls = ChatControls {
         allow_file_attachments: true,
         allow_directory_context: true,
+        allow_document_selection: true,
         ..ChatControls::default()
     };
 
@@ -55,6 +56,19 @@ fn App() -> Element {
                             "[ custom map widget ]"
                         }
                     }
+                }
+            },
+            // Selected documents added to context become attachments.
+            on_document: move |event: DocumentEvent| match event {
+                DocumentEvent::AddToContext(docs) => {
+                    let n = docs.len();
+                    for doc in &docs {
+                        let item = ContextItem::from_document(doc);
+                        if !attachments.read().iter().any(|a| a.id == item.id) {
+                            attachments.write().push(item);
+                        }
+                    }
+                    last_action.set(format!("Last action: added {n} document(s) to context"));
                 }
             },
             on_context: move |event: ContextEvent| {
