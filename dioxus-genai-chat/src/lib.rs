@@ -403,8 +403,8 @@ impl Default for ChatControls {
             placeholder: "Ask anything, or invoke a tool...".to_string(),
             allow_file_attachments: false,
             allow_directory_context: false,
-            attach_files_label: "📎 Attach files".to_string(),
-            add_directory_label: "📁 Add directory".to_string(),
+            attach_files_label: "📎 Add files".to_string(),
+            add_directory_label: "📁 Add folder".to_string(),
         }
     }
 }
@@ -485,13 +485,20 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-control-label { font-size: 0.78rem; color: var(--bulma-text-weak, #7a7a7a); }
 .gc-toggle { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; }
 
-.gc-attachments { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
-.gc-attachment { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.15rem 0.3rem 0.15rem 0.5rem; border-radius: 999px; background: var(--bulma-scheme-main-bis, #f5f7fa); border: 1px solid var(--bulma-border-weak, #ededed); font-size: 0.78rem; }
+.gc-input-box { border: 1px solid var(--bulma-border, #dbdbdb); border-radius: 0.7rem; background: var(--bulma-scheme-main, #fff); padding: 0.5rem 0.6rem; transition: border-color 0.15s ease, box-shadow 0.15s ease; }
+.gc-input-box:focus-within { border-color: var(--bulma-link, #485fc7); box-shadow: 0 0 0 2px rgba(72, 95, 199, 0.12); }
+.gc-input-box textarea, .gc-input-box .textarea { border: none !important; box-shadow: none !important; background: transparent; padding: 0.1rem; min-height: 3.5rem; resize: vertical; }
+
+.gc-attachments { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.4rem; }
+.gc-attachment { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.1rem 0.25rem 0.1rem 0.5rem; border-radius: 999px; background: var(--bulma-scheme-main-bis, #f5f7fa); border: 1px solid var(--bulma-border-weak, #ededed); font-size: 0.76rem; }
 .gc-attachment-kind { font-size: 0.8rem; line-height: 1; }
 .gc-attachment-label { color: var(--bulma-text, #363636); }
 .gc-attachment-remove { cursor: pointer; border: none; background: none; color: var(--bulma-text-weak, #7a7a7a); font-size: 1rem; line-height: 1; padding: 0 0.15rem; }
 .gc-attachment-remove:hover { color: var(--bulma-danger, #f14668); }
-.gc-context-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+.gc-context-actions { display: flex; flex-wrap: wrap; gap: 0.15rem; margin-top: 0.3rem; }
+.gc-context-btn { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; border: none; background: transparent; color: var(--bulma-text-weak, #7a7a7a); font-size: 0.76rem; padding: 0.2rem 0.4rem; border-radius: 0.4rem; line-height: 1; transition: background 0.12s ease, color 0.12s ease; }
+.gc-context-btn:hover:not(:disabled) { background: var(--bulma-scheme-main-bis, #f0f1f4); color: var(--bulma-text, #363636); }
+.gc-context-btn:disabled { opacity: 0.5; cursor: default; }
 .gc-diff { border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.6rem; overflow: hidden; font-size: 0.8rem; }
 .gc-diff-header { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.7rem; background: var(--bulma-scheme-main-bis, #f5f7fa); border-bottom: 1px solid var(--bulma-border-weak, #ededed); }
 .gc-diff-file { font-family: monospace; font-weight: 600; color: var(--bulma-text, #363636); }
@@ -552,59 +559,58 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                         }
 
                         if props.controls.show_input {
-                            if !props.attachments.is_empty() {
-                                div {
-                                    class: "gc-attachments",
-                                    for item in props.attachments.iter() {
-                                        {
-                                            let id = item.id.clone();
-                                            rsx! {
-                                                span {
-                                                    key: "{item.id}",
-                                                    class: "gc-attachment",
-                                                    span { class: "gc-attachment-kind", "{context_kind_icon(item.kind)}" }
-                                                    span { class: "gc-attachment-label", "{item.label}" }
-                                                    button {
-                                                        class: "gc-attachment-remove",
-                                                        title: "Remove",
-                                                        onclick: move |_| on_context.call(ContextEvent::Remove(id.clone())),
-                                                        "×"
+                            div {
+                                class: "gc-input-box",
+                                if !props.attachments.is_empty() {
+                                    div {
+                                        class: "gc-attachments",
+                                        for item in props.attachments.iter() {
+                                            {
+                                                let id = item.id.clone();
+                                                rsx! {
+                                                    span {
+                                                        key: "{item.id}",
+                                                        class: "gc-attachment",
+                                                        span { class: "gc-attachment-kind", "{context_kind_icon(item.kind)}" }
+                                                        span { class: "gc-attachment-label", "{item.label}" }
+                                                        button {
+                                                            class: "gc-attachment-remove",
+                                                            title: "Remove",
+                                                            onclick: move |_| on_context.call(ContextEvent::Remove(id.clone())),
+                                                            "×"
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
                                     }
                                 }
-                            }
-                            if show_context_actions {
-                                div {
-                                    class: "gc-context-actions",
-                                    if props.controls.allow_file_attachments {
-                                        button {
-                                            class: "button is-small is-light",
-                                            disabled: !props.controls.input_enabled,
-                                            onclick: move |_| on_context.call(ContextEvent::AddFilesRequested),
-                                            "{props.controls.attach_files_label}"
-                                        }
-                                    }
-                                    if props.controls.allow_directory_context {
-                                        button {
-                                            class: "button is-small is-light",
-                                            disabled: !props.controls.input_enabled,
-                                            onclick: move |_| on_context.call(ContextEvent::AddDirectoryRequested),
-                                            "{props.controls.add_directory_label}"
-                                        }
-                                    }
+                                Textarea {
+                                    value: String::new(),
+                                    placeholder: props.controls.placeholder.clone(),
+                                    rows: 3,
+                                    disabled: !props.controls.input_enabled,
+                                    readonly: !props.controls.input_enabled,
                                 }
-                            }
-                            Field {
-                                Control {
-                                    Textarea {
-                                        value: String::new(),
-                                        placeholder: props.controls.placeholder.clone(),
-                                        rows: 3,
-                                        disabled: !props.controls.input_enabled,
-                                        readonly: !props.controls.input_enabled,
+                                if show_context_actions {
+                                    div {
+                                        class: "gc-context-actions",
+                                        if props.controls.allow_file_attachments {
+                                            button {
+                                                class: "gc-context-btn",
+                                                disabled: !props.controls.input_enabled,
+                                                onclick: move |_| on_context.call(ContextEvent::AddFilesRequested),
+                                                "{props.controls.attach_files_label}"
+                                            }
+                                        }
+                                        if props.controls.allow_directory_context {
+                                            button {
+                                                class: "gc-context-btn",
+                                                disabled: !props.controls.input_enabled,
+                                                onclick: move |_| on_context.call(ContextEvent::AddDirectoryRequested),
+                                                "{props.controls.add_directory_label}"
+                                            }
+                                        }
                                     }
                                 }
                             }
