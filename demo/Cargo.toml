@@ -4,5 +4,14 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-dioxus-genai-chat = { path = "../dioxus-genai-chat" }
+dioxus-genai-chat = { path = "../dioxus-genai-chat", default-features = false }
+dioxus = "0.7"
 serde_json = "1"
+
+[features]
+# Desktop is the default so `cargo run -p demo` works without dioxus-cli.
+default = ["desktop"]
+# Desktop re-enables genai (native, has full tokio).
+desktop = ["dioxus/desktop", "dioxus-genai-chat/genai"]
+# Web builds to wasm and must NOT enable genai (tokio networking is unsupported there).
+web = ["dioxus/web"]

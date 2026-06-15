@@ -6,9 +6,15 @@ edition = "2024"
 [dependencies]
 dioxus = "0.7"
 dioxus-bulma = "0.7.3"
-genai = "0.2.0-rc.2"
+# Optional: genai pulls in tokio networking features that don't build on wasm,
+# so it is gated behind a feature to allow a web/wasm build of the UI.
+genai = { version = "0.2.0-rc.2", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+[features]
+default = ["genai"]
+genai = ["dep:genai"]
 
 [dev-dependencies]
 pretty_assertions = "1"
