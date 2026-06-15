@@ -276,6 +276,58 @@ fn default_true() -> bool {
     true
 }
 
+/// The type of a [`Document`], used to pick an icon when there is no image preview.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DocumentKind {
+    Image,
+    Pdf,
+    Text,
+    Other,
+}
+
+/// A document shown as a thumbnail that expands to a full view on click.
+///
+/// `image` (a URL or data URI) is used for the thumbnail and the enlarged image
+/// view. `text` provides inline content for the expanded view of text documents.
+/// If neither is set, a kind-based icon is shown.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Document {
+    pub id: String,
+    /// Display name, e.g. "diagram.png".
+    pub name: String,
+    pub kind: DocumentKind,
+    /// Image source (URL or data URI) for image documents.
+    #[serde(default)]
+    pub image: Option<String>,
+    /// Text content shown in the expanded view (for text/code documents).
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+impl Document {
+    /// An image document: the same `src` is used for the thumbnail and full view.
+    pub fn image(id: impl Into<String>, name: impl Into<String>, src: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            kind: DocumentKind::Image,
+            image: Some(src.into()),
+            text: None,
+        }
+    }
+
+    /// A text document: shown as an icon thumbnail that expands to the content.
+    pub fn text(id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            name: name.into(),
+            kind: DocumentKind::Text,
+            image: None,
+            text: Some(content.into()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -291,6 +343,8 @@ pub enum ChatMessagePayload {
     Controls(Vec<InlineControl>),
     /// A unified file diff, optionally animated as it is applied.
     Diff(FileDiff),
+    /// A gallery of document thumbnails that expand to a full view.
+    Documents(Vec<Document>),
     Typing,
     Error(String),
 }
@@ -361,6 +415,7 @@ impl ChatTranscript {
                 | (_, ChatMessagePayload::Status(_))
                 | (_, ChatMessagePayload::Controls(_))
                 | (_, ChatMessagePayload::Diff(_))
+                | (_, ChatMessagePayload::Documents(_))
                 | (_, ChatMessagePayload::Typing) => {}
             }
         }
@@ -517,7 +572,26 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-diff-animate.gc-diff-added { animation: gc-diff-reveal 0.28s ease both, gc-flash-add 1.1s ease; }
 .gc-diff-animate.gc-diff-removed { animation: gc-diff-reveal 0.28s ease both, gc-flash-remove 1.1s ease; }
 
+.gc-docs { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+.gc-doc-thumb { cursor: pointer; border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.5rem; background: var(--bulma-scheme-main, #fff); padding: 0; width: 7rem; overflow: hidden; display: flex; flex-direction: column; text-align: left; transition: border-color 0.12s ease, box-shadow 0.12s ease; }
+.gc-doc-thumb:hover { border-color: var(--bulma-link, #485fc7); box-shadow: 0 2px 8px rgba(10, 10, 10, 0.08); }
+.gc-doc-preview { height: 4.6rem; display: flex; align-items: center; justify-content: center; background: var(--bulma-scheme-main-bis, #f5f7fa); overflow: hidden; }
+.gc-doc-preview img { width: 100%; height: 100%; object-fit: cover; }
+.gc-doc-icon { font-size: 1.9rem; }
+.gc-doc-name { font-size: 0.72rem; padding: 0.3rem 0.4rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--bulma-text, #363636); }
+
+.gc-lightbox { position: fixed; inset: 0; background: rgba(10, 10, 10, 0.7); display: flex; align-items: center; justify-content: center; padding: 2rem; z-index: 1000; animation: gc-fade-in 0.15s ease; }
+.gc-lightbox-card { background: var(--bulma-scheme-main, #fff); border-radius: 0.6rem; max-width: 90vw; max-height: 90vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(10, 10, 10, 0.4); }
+.gc-lightbox-head { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--bulma-border-weak, #ededed); }
+.gc-lightbox-title { font-weight: 600; font-size: 0.9rem; color: var(--bulma-text, #363636); }
+.gc-lightbox-close { cursor: pointer; border: none; background: none; font-size: 1.4rem; line-height: 1; color: var(--bulma-text-weak, #7a7a7a); }
+.gc-lightbox-close:hover { color: var(--bulma-text, #363636); }
+.gc-lightbox-body { padding: 0.9rem; overflow: auto; }
+.gc-lightbox-body img { max-width: 100%; max-height: 75vh; display: block; margin: 0 auto; }
+.gc-lightbox-text { font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; margin: 0; }
+
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+@keyframes gc-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes gc-spin { to { transform: rotate(360deg); } }
 @keyframes gc-diff-reveal { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
 @keyframes gc-flash-add { 0% { background: rgba(72, 199, 142, 0.55); } 100% { background: rgba(72, 199, 142, 0.14); } }
@@ -691,6 +765,9 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                     },
                     ChatMessagePayload::Diff(diff) => rsx! {
                         DiffView { diff: diff.clone() }
+                    },
+                    ChatMessagePayload::Documents(documents) => rsx! {
+                        DocumentGallery { documents: documents.clone() }
                     },
                     ChatMessagePayload::Typing => rsx! {
                         div {
@@ -914,6 +991,85 @@ fn diff_sign(kind: DiffKind) -> &'static str {
     }
 }
 
+fn document_icon(kind: DocumentKind) -> &'static str {
+    match kind {
+        DocumentKind::Image => "🖼️",
+        DocumentKind::Pdf => "📕",
+        DocumentKind::Text => "📄",
+        DocumentKind::Other => "📎",
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct DocumentGalleryProps {
+    documents: Vec<Document>,
+}
+
+/// A row of document thumbnails. Clicking one opens a full-view lightbox.
+///
+/// The expanded index is local view state (like a native `<details>` toggle) —
+/// it is not part of the transcript, so it lives in a signal here.
+#[component]
+fn DocumentGallery(props: DocumentGalleryProps) -> Element {
+    let mut expanded = use_signal(|| None::<usize>);
+    let documents = props.documents.clone();
+
+    rsx! {
+        div {
+            class: "gc-docs",
+            for (idx, doc) in documents.iter().enumerate() {
+                button {
+                    key: "{doc.id}",
+                    class: "gc-doc-thumb",
+                    title: "{doc.name}",
+                    onclick: move |_| expanded.set(Some(idx)),
+                    div {
+                        class: "gc-doc-preview",
+                        if let Some(src) = &doc.image {
+                            img { src: "{src}", alt: "{doc.name}" }
+                        } else {
+                            span { class: "gc-doc-icon", "{document_icon(doc.kind)}" }
+                        }
+                    }
+                    span { class: "gc-doc-name", "{doc.name}" }
+                }
+            }
+        }
+        if let Some(idx) = expanded() {
+            if let Some(doc) = documents.get(idx) {
+                div {
+                    class: "gc-lightbox",
+                    onclick: move |_| expanded.set(None),
+                    div {
+                        class: "gc-lightbox-card",
+                        onclick: move |e| e.stop_propagation(),
+                        div {
+                            class: "gc-lightbox-head",
+                            span { class: "gc-lightbox-title", "{doc.name}" }
+                            button {
+                                class: "gc-lightbox-close",
+                                title: "Close",
+                                onclick: move |_| expanded.set(None),
+                                "×"
+                            }
+                        }
+                        div {
+                            class: "gc-lightbox-body",
+                            if let Some(src) = &doc.image {
+                                img { src: "{src}", alt: "{doc.name}" }
+                            } else if let Some(text) = &doc.text {
+                                pre { class: "gc-lightbox-text", "{text}" }
+                            } else {
+                                p { class: "gc-muted", "No preview available." }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[derive(Props, Clone, PartialEq)]
 struct ReasoningPanelProps {
     reasoning: Reasoning,
@@ -1082,6 +1238,21 @@ pub fn sample_transcript() -> ChatTranscript {
                 DiffLine::context("}"),
             ],
         }),
+    );
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::Documents(vec![
+            Document::image(
+                "doc-diagram",
+                "diagram.svg",
+                "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMTIwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjEyMCIgZmlsbD0iIzQ4NWZjNyIvPjxjaXJjbGUgY3g9IjgwIiBjeT0iNTUiIHI9IjI4IiBmaWxsPSIjZmZkNTdlIi8+PHJlY3QgeT0iOTIiIHdpZHRoPSIxNjAiIGhlaWdodD0iMjgiIGZpbGw9IiMzYTRmYjAiLz48dGV4dCB4PSI4MCIgeT0iMTExIiBmb250LWZhbWlseT0ic2Fucy1zZXJpZiIgZm9udC1zaXplPSIxMyIgZmlsbD0iI2ZmZiIgdGV4dC1hbmNob3I9Im1pZGRsZSI+ZGlhZ3JhbS5zdmc8L3RleHQ+PC9zdmc+",
+            ),
+            Document::text(
+                "doc-report",
+                "report.md",
+                "# Telemetry report\n\n- Error rate: 0.14 (was 0.20)\n- Latency p95: stable\n- Window: last 24h",
+            ),
+        ]),
     );
     transcript.push(
         ChatRole::Assistant,
