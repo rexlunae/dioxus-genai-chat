@@ -182,6 +182,52 @@ pub struct ControlEvent {
     pub value: ControlValue,
 }
 
+/// Whether a piece of attached context is a file or a directory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextKind {
+    File,
+    Directory,
+}
+
+/// A piece of context (a file or directory) attached to the next message.
+///
+/// The pending list is owned by the caller and passed to [`ChatSurface`] via
+/// `attachments`; the component renders it and emits [`ContextEvent`]s. How files
+/// and directories are actually chosen (native dialog, browser input, typed path)
+/// is up to the caller — see the `on_context` handler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ContextItem {
+    /// Stable id used when the user removes the item.
+    pub id: String,
+    /// Display label, e.g. a file name or directory path.
+    pub label: String,
+    pub kind: ContextKind,
+}
+
+impl ContextItem {
+    pub fn file(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into(), kind: ContextKind::File }
+    }
+
+    pub fn directory(id: impl Into<String>, label: impl Into<String>) -> Self {
+        Self { id: id.into(), label: label.into(), kind: ContextKind::Directory }
+    }
+}
+
+/// Emitted when the user adds or removes context via the input area.
+///
+/// Handle this in [`ChatSurface`]'s `on_context` and update the `attachments`
+/// list you pass back in (a controlled component, like [`InlineControl`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ContextEvent {
+    /// The user asked to attach file(s); open a picker and add [`ContextItem`]s.
+    AddFilesRequested,
+    /// The user asked to add a directory as context.
+    AddDirectoryRequested,
+    /// The user removed the attached item with this `id`.
+    Remove(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -283,6 +329,15 @@ pub struct ChatControls {
     pub show_clear_button: bool,
     pub input_enabled: bool,
     pub placeholder: String,
+    /// Show the "attach files" affordance. Off by default — enabling it requires
+    /// wiring [`ChatSurface`]'s `on_context` handler to do the picking.
+    pub allow_file_attachments: bool,
+    /// Show the "add directory" affordance.
+    pub allow_directory_context: bool,
+    /// Label for the attach-files button.
+    pub attach_files_label: String,
+    /// Label for the add-directory button.
+    pub add_directory_label: String,
 }
 
 impl Default for ChatControls {
@@ -295,6 +350,10 @@ impl Default for ChatControls {
             show_clear_button: true,
             input_enabled: true,
             placeholder: "Ask anything, or invoke a tool...".to_string(),
+            allow_file_attachments: false,
+            allow_directory_context: false,
+            attach_files_label: "📎 Attach files".to_string(),
+            add_directory_label: "📁 Add directory".to_string(),
         }
     }
 }
@@ -311,6 +370,13 @@ pub struct ChatSurfaceProps {
     /// Fired when the user interacts with an inline [`InlineControl`].
     #[props(default)]
     pub on_action: EventHandler<ControlEvent>,
+    /// Context (files/directories) currently attached to the next message.
+    /// Owned by the caller; render-only here.
+    #[props(default)]
+    pub attachments: Vec<ContextItem>,
+    /// Fired when the user adds or removes context via the input area.
+    #[props(default)]
+    pub on_context: EventHandler<ContextEvent>,
 }
 
 /// Scoped styling for the compact captions and the chained reasoning timeline.
@@ -368,6 +434,14 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-control-label { font-size: 0.78rem; color: var(--bulma-text-weak, #7a7a7a); }
 .gc-toggle { display: inline-flex; align-items: center; gap: 0.35rem; font-size: 0.85rem; }
 
+.gc-attachments { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+.gc-attachment { display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.15rem 0.3rem 0.15rem 0.5rem; border-radius: 999px; background: var(--bulma-scheme-main-bis, #f5f7fa); border: 1px solid var(--bulma-border-weak, #ededed); font-size: 0.78rem; }
+.gc-attachment-kind { font-size: 0.8rem; line-height: 1; }
+.gc-attachment-label { color: var(--bulma-text, #363636); }
+.gc-attachment-remove { cursor: pointer; border: none; background: none; color: var(--bulma-text-weak, #7a7a7a); font-size: 1rem; line-height: 1; padding: 0 0.15rem; }
+.gc-attachment-remove:hover { color: var(--bulma-danger, #f14668); }
+.gc-context-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @keyframes gc-spin { to { transform: rotate(360deg); } }
 "#;
@@ -378,6 +452,9 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
         .title
         .clone()
         .unwrap_or_else(|| "Dioxus GenAI Chat".to_string());
+    let on_context = props.on_context;
+    let show_context_actions =
+        props.controls.allow_file_attachments || props.controls.allow_directory_context;
 
     rsx! {
         BulmaProvider {
@@ -404,6 +481,51 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                         }
 
                         if props.controls.show_input {
+                            if !props.attachments.is_empty() {
+                                div {
+                                    class: "gc-attachments",
+                                    for item in props.attachments.iter() {
+                                        {
+                                            let id = item.id.clone();
+                                            rsx! {
+                                                span {
+                                                    key: "{item.id}",
+                                                    class: "gc-attachment",
+                                                    span { class: "gc-attachment-kind", "{context_kind_icon(item.kind)}" }
+                                                    span { class: "gc-attachment-label", "{item.label}" }
+                                                    button {
+                                                        class: "gc-attachment-remove",
+                                                        title: "Remove",
+                                                        onclick: move |_| on_context.call(ContextEvent::Remove(id.clone())),
+                                                        "×"
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if show_context_actions {
+                                div {
+                                    class: "gc-context-actions",
+                                    if props.controls.allow_file_attachments {
+                                        button {
+                                            class: "button is-small is-light",
+                                            disabled: !props.controls.input_enabled,
+                                            onclick: move |_| on_context.call(ContextEvent::AddFilesRequested),
+                                            "{props.controls.attach_files_label}"
+                                        }
+                                    }
+                                    if props.controls.allow_directory_context {
+                                        button {
+                                            class: "button is-small is-light",
+                                            disabled: !props.controls.input_enabled,
+                                            onclick: move |_| on_context.call(ContextEvent::AddDirectoryRequested),
+                                            "{props.controls.add_directory_label}"
+                                        }
+                                    }
+                                }
+                            }
                             Field {
                                 Control {
                                     Textarea {
@@ -685,6 +807,13 @@ fn ReasoningPanel(props: ReasoningPanelProps) -> Element {
                 }
             }
         }
+    }
+}
+
+fn context_kind_icon(kind: ContextKind) -> &'static str {
+    match kind {
+        ContextKind::File => "📄",
+        ContextKind::Directory => "📁",
     }
 }
 

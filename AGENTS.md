@@ -65,12 +65,19 @@ The match arms are exhaustive (no catch-all), so a new variant requires updating
    status / controls / typing are ignored — they are not sent to the model).
 2. `ChatBubble` (in `lib.rs`) — render it.
 
-### Inline controls are a *controlled* component
+### Controlled components (no internal state)
 
-`InlineControl` (Button/Select/Toggle) does not own its state. Interactions fire
-`ChatSurface`'s `on_action: EventHandler<ControlEvent>`; the consumer updates the
-transcript in response. Keep it that way — don't add internal mutable state to
-the controls.
+Interactive widgets do not own their state — they render from props and emit
+events; the consumer mutates the source data and passes it back. Keep it that
+way; don't add internal mutable state.
+
+- `InlineControl` (Button/Select/Toggle) → `on_action: EventHandler<ControlEvent>`;
+  consumer updates the transcript.
+- Context attachments (`ContextItem`, files/directories) → `attachments` prop +
+  `on_context: EventHandler<ContextEvent>`; consumer owns the pending list and
+  does the actual file/dir picking (native dialog, browser input, typed path —
+  the library deliberately has no file-dialog dependency). Enable via
+  `ChatControls::allow_file_attachments` / `allow_directory_context`.
 
 ### Styling
 
