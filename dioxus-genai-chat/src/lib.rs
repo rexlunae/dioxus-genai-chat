@@ -283,48 +283,77 @@ pub enum DocumentKind {
     Pdf,
     Text,
     Other,
+    /// Rendered by a caller-provided handler — see [`ChatSurface`]'s
+    /// `render_document`.
+    Custom,
 }
 
 /// A document shown as a thumbnail that expands to a full view on click.
 ///
-/// `image` (a URL or data URI) is used for the thumbnail and the enlarged image
-/// view. `text` provides inline content for the expanded view of text documents.
-/// If neither is set, a kind-based icon is shown.
+/// Built-in full views: image (`image`), PDF (`url`, with an optional `image`
+/// page preview), and text (`text`). For anything else, set `kind` to
+/// [`DocumentKind::Custom`] and provide a `render_document` handler on the
+/// [`ChatSurface`]; `data` carries an arbitrary payload for that handler.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Document {
     pub id: String,
     /// Display name, e.g. "diagram.png".
     pub name: String,
     pub kind: DocumentKind,
-    /// Image source (URL or data URI) for image documents.
+    /// Image source (URL or data URI): thumbnail + enlarged image, or a PDF page
+    /// preview.
     #[serde(default)]
     pub image: Option<String>,
-    /// Text content shown in the expanded view (for text/code documents).
+    /// Source URL (PDF, downloadable original, custom resource).
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Inline text content shown in the expanded view (for text/code documents).
     #[serde(default)]
     pub text: Option<String>,
+    /// Arbitrary payload for a custom handler to interpret.
+    #[serde(default)]
+    pub data: Option<Value>,
 }
 
 impl Document {
-    /// An image document: the same `src` is used for the thumbnail and full view.
-    pub fn image(id: impl Into<String>, name: impl Into<String>, src: impl Into<String>) -> Self {
+    fn bare(id: impl Into<String>, name: impl Into<String>, kind: DocumentKind) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
-            kind: DocumentKind::Image,
-            image: Some(src.into()),
+            kind,
+            image: None,
+            url: None,
             text: None,
+            data: None,
         }
+    }
+
+    /// An image document: the same `src` is used for the thumbnail and full view.
+    pub fn image(id: impl Into<String>, name: impl Into<String>, src: impl Into<String>) -> Self {
+        Self { image: Some(src.into()), ..Self::bare(id, name, DocumentKind::Image) }
     }
 
     /// A text document: shown as an icon thumbnail that expands to the content.
     pub fn text(id: impl Into<String>, name: impl Into<String>, content: impl Into<String>) -> Self {
-        Self {
-            id: id.into(),
-            name: name.into(),
-            kind: DocumentKind::Text,
-            image: None,
-            text: Some(content.into()),
-        }
+        Self { text: Some(content.into()), ..Self::bare(id, name, DocumentKind::Text) }
+    }
+
+    /// A PDF document. `url` points at the file; set [`Document::image`]-style
+    /// `image` too for a page preview where inline PDF rendering is unavailable.
+    pub fn pdf(id: impl Into<String>, name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self { url: Some(url.into()), ..Self::bare(id, name, DocumentKind::Pdf) }
+    }
+
+    /// A custom document rendered by a `render_document` handler. `data` is passed
+    /// through for the handler to interpret.
+    pub fn custom(id: impl Into<String>, name: impl Into<String>, data: Value) -> Self {
+        Self { data: Some(data), ..Self::bare(id, name, DocumentKind::Custom) }
+    }
+
+    /// Attach a page-preview image (e.g. for a PDF).
+    pub fn with_image(mut self, src: impl Into<String>) -> Self {
+        self.image = Some(src.into());
+        self
     }
 }
 
@@ -483,6 +512,11 @@ pub struct ChatSurfaceProps {
     /// Fired when the user adds or removes context via the input area.
     #[props(default)]
     pub on_context: EventHandler<ContextEvent>,
+    /// Custom renderer for the expanded (full) view of [`DocumentKind::Custom`]
+    /// documents. Receives the [`Document`] and returns the element to show in the
+    /// lightbox. Without it, custom documents show a "no handler" placeholder.
+    #[props(default)]
+    pub render_document: Option<Callback<Document, Element>>,
 }
 
 /// Scoped styling for the compact captions and the chained reasoning timeline.
@@ -589,6 +623,8 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-lightbox-body { padding: 0.9rem; overflow: auto; }
 .gc-lightbox-body img { max-width: 100%; max-height: 75vh; display: block; margin: 0 auto; }
 .gc-lightbox-text { font-family: monospace; font-size: 0.8rem; white-space: pre-wrap; margin: 0; }
+.gc-pdf { width: 80vw; max-width: 900px; height: 75vh; border: none; }
+.gc-doc-link { display: inline-block; margin-top: 0.6rem; font-size: 0.85rem; color: var(--bulma-link, #485fc7); }
 
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @keyframes gc-fade-in { from { opacity: 0; } to { opacity: 1; } }
@@ -629,6 +665,7 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                                 key: "{idx}",
                                 message: message.clone(),
                                 on_action: props.on_action,
+                                render_document: props.render_document,
                             }
                         }
 
@@ -730,6 +767,8 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
 struct ChatBubbleProps {
     message: ChatMessage,
     on_action: EventHandler<ControlEvent>,
+    #[props(default)]
+    render_document: Option<Callback<Document, Element>>,
 }
 
 #[component]
@@ -767,7 +806,7 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                         DiffView { diff: diff.clone() }
                     },
                     ChatMessagePayload::Documents(documents) => rsx! {
-                        DocumentGallery { documents: documents.clone() }
+                        DocumentGallery { documents: documents.clone(), render_document: props.render_document }
                     },
                     ChatMessagePayload::Typing => rsx! {
                         div {
@@ -997,12 +1036,15 @@ fn document_icon(kind: DocumentKind) -> &'static str {
         DocumentKind::Pdf => "📕",
         DocumentKind::Text => "📄",
         DocumentKind::Other => "📎",
+        DocumentKind::Custom => "🧩",
     }
 }
 
 #[derive(Props, Clone, PartialEq)]
 struct DocumentGalleryProps {
     documents: Vec<Document>,
+    #[props(default)]
+    render_document: Option<Callback<Document, Element>>,
 }
 
 /// A row of document thumbnails. Clicking one opens a full-view lightbox.
@@ -1013,6 +1055,7 @@ struct DocumentGalleryProps {
 fn DocumentGallery(props: DocumentGalleryProps) -> Element {
     let mut expanded = use_signal(|| None::<usize>);
     let documents = props.documents.clone();
+    let render_document = props.render_document;
 
     rsx! {
         div {
@@ -1055,10 +1098,39 @@ fn DocumentGallery(props: DocumentGalleryProps) -> Element {
                         }
                         div {
                             class: "gc-lightbox-body",
-                            if let Some(src) = &doc.image {
+                            if doc.kind == DocumentKind::Custom {
+                                if let Some(cb) = render_document {
+                                    {cb.call(doc.clone())}
+                                } else {
+                                    p { class: "gc-muted", "No handler registered for this document." }
+                                }
+                            } else if doc.kind == DocumentKind::Pdf {
+                                if let Some(src) = &doc.image {
+                                    img { src: "{src}", alt: "{doc.name}" }
+                                } else if let Some(url) = &doc.url {
+                                    iframe { class: "gc-pdf", src: "{url}", title: "{doc.name}" }
+                                }
+                                if let Some(url) = &doc.url {
+                                    a {
+                                        class: "gc-doc-link",
+                                        href: "{url}",
+                                        target: "_blank",
+                                        rel: "noopener",
+                                        "Open original ↗"
+                                    }
+                                }
+                            } else if let Some(src) = &doc.image {
                                 img { src: "{src}", alt: "{doc.name}" }
                             } else if let Some(text) = &doc.text {
                                 pre { class: "gc-lightbox-text", "{text}" }
+                            } else if let Some(url) = &doc.url {
+                                a {
+                                    class: "gc-doc-link",
+                                    href: "{url}",
+                                    target: "_blank",
+                                    rel: "noopener",
+                                    "Open ↗"
+                                }
                             } else {
                                 p { class: "gc-muted", "No preview available." }
                             }
@@ -1251,6 +1323,14 @@ pub fn sample_transcript() -> ChatTranscript {
                 "doc-report",
                 "report.md",
                 "# Telemetry report\n\n- Error rate: 0.14 (was 0.20)\n- Latency p95: stable\n- Window: last 24h",
+            ),
+            Document::pdf("doc-pdf", "report.pdf", "https://example.com/report.pdf").with_image(
+                "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxNjAiIGhlaWdodD0iMjAwIj48cmVjdCB3aWR0aD0iMTYwIiBoZWlnaHQ9IjIwMCIgZmlsbD0iI2ZmZiIgc3Ryb2tlPSIjZGJkYmRiIi8+PHJlY3QgeD0iMTYiIHk9IjIwIiB3aWR0aD0iMTI4IiBoZWlnaHQ9IjEyIiBmaWxsPSIjZjE0NjY4Ii8+PHJlY3QgeD0iMTYiIHk9IjQ4IiB3aWR0aD0iMTI4IiBoZWlnaHQ9IjgiIGZpbGw9IiNkYmRiZGIiLz48cmVjdCB4PSIxNiIgeT0iNjQiIHdpZHRoPSIxMTAiIGhlaWdodD0iOCIgZmlsbD0iI2RiZGJkYiIvPjxyZWN0IHg9IjE2IiB5PSI4MCIgd2lkdGg9IjEyMCIgaGVpZ2h0PSI4IiBmaWxsPSIjZGJkYmRiIi8+PHRleHQgeD0iODAiIHk9IjE3MCIgZm9udC1mYW1pbHk9InNhbnMtc2VyaWYiIGZvbnQtc2l6ZT0iMTYiIGZpbGw9IiNmMTQ2NjgiIHRleHQtYW5jaG9yPSJtaWRkbGUiPlBERjwvdGV4dD48L3N2Zz4=",
+            ),
+            Document::custom(
+                "doc-loc",
+                "location.geo",
+                serde_json::json!({ "coords": "47.6062° N, 122.3321° W" }),
             ),
         ]),
     );

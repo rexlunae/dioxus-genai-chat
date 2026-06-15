@@ -36,6 +36,27 @@ fn App() -> Element {
                 };
                 last_action.set(format!("Last action: {summary}"));
             },
+            // Custom handler: render the expanded view of `DocumentKind::Custom`
+            // documents however the app likes, using the document's `data` payload.
+            render_document: move |doc: dioxus_genai_chat::Document| {
+                let coords = doc
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("coords"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("unknown");
+                rsx! {
+                    div {
+                        style: "padding: 1rem; min-width: 18rem;",
+                        p { style: "font-weight: 600; margin-bottom: 0.5rem;", "📍 Location handler" }
+                        p { "Coordinates: {coords}" }
+                        div {
+                            style: "margin-top: 0.75rem; height: 8rem; border-radius: 0.5rem; background: linear-gradient(135deg, #6dd5ed, #2193b0); display: flex; align-items: center; justify-content: center; color: white;",
+                            "[ custom map widget ]"
+                        }
+                    }
+                }
+            },
             on_context: move |event: ContextEvent| {
                 // A real app would open a native file dialog (e.g. `rfd`) on desktop
                 // or an <input type="file"> on web, then add the chosen paths. Here we

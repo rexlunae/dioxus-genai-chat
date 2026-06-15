@@ -82,6 +82,12 @@ fine to keep in a local signal — it is not conversation data. Example:
   does the actual file/dir picking (native dialog, browser input, typed path —
   the library deliberately has no file-dialog dependency). Enable via
   `ChatControls::allow_file_attachments` / `allow_directory_context`.
+- Documents (`Document`/`DocumentKind`) → built-in full views for image, PDF
+  (`url` + optional `image` page preview; inline render via `<iframe>`), and
+  text. For `DocumentKind::Custom`, the consumer supplies
+  `render_document: Callback<Document, Element>` and reads `Document::data`
+  (arbitrary JSON) to render the expanded view. Note PDFs may not render inline
+  in every webview (e.g. webkit2gtk) — provide a page-preview `image` for those.
 
 ### Styling
 
