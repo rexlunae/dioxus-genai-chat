@@ -9,10 +9,17 @@
 //!   surfaced through [`ChatSurface`]'s `on_action` handler,
 //! - spinning status indicators, tool calls, progress, and errors.
 //!
+//! The composer is **controlled**: bind [`ChatSurfaceProps::input`] and handle
+//! `on_send`/`on_stop`/`on_retry`/`on_clear`. Set [`ChatSurfaceProps::embedded`]
+//! to host the surface inside an app that already provides Bulma and a theme,
+//! and inject app-specific composer controls via
+//! [`ChatSurfaceProps::input_accessory`].
+//!
 //! With the default `genai` feature enabled, [`ChatTranscript::to_genai_request`]
 //! converts a transcript into a [`genai`] chat request. Disable default features
 //! to build for `wasm32-unknown-unknown` (the web target), where `genai` is not
-//! available.
+//! available. The `markdown` feature (on by default, pure Rust) renders
+//! [`ChatMessagePayload::Markdown`] to HTML.
 //!
 //! [Dioxus]: https://dioxuslabs.com/
 //! [Bulma]: https://bulma.io/
@@ -524,6 +531,40 @@ pub struct ChatSurfaceProps {
     pub title: Option<String>,
     #[props(default)]
     pub theme: Option<BulmaTheme>,
+    /// Embed the surface inside a host app instead of rendering a standalone
+    /// page. When `true`, the component does **not** wrap itself in a
+    /// [`BulmaProvider`] (so it pulls no Bulma CSS and applies no theme of its
+    /// own — the host owns both) and drops the `Section`/`Container`/`Box`/title
+    /// page chrome, rendering the transcript and composer directly. The scoped
+    /// `.gc-*` styles are still injected either way.
+    #[props(default)]
+    pub embedded: bool,
+    /// The current value of the composer text input (controlled, like
+    /// [`transcript`](Self::transcript) and [`attachments`](Self::attachments)).
+    /// Update it from [`on_input`](Self::on_input).
+    #[props(default)]
+    pub input: String,
+    /// Fired on every keystroke in the composer with the new input value.
+    #[props(default)]
+    pub on_input: EventHandler<String>,
+    /// Fired when the user submits the composer (Send button or Enter). Carries
+    /// the current input text; clear [`input`](Self::input) in response.
+    #[props(default)]
+    pub on_send: EventHandler<String>,
+    /// Fired when the user clicks Stop to interrupt an in-flight response.
+    #[props(default)]
+    pub on_stop: EventHandler<()>,
+    /// Fired when the user clicks Retry.
+    #[props(default)]
+    pub on_retry: EventHandler<()>,
+    /// Fired when the user clicks Clear.
+    #[props(default)]
+    pub on_clear: EventHandler<()>,
+    /// Optional caller-supplied controls rendered inside the composer (e.g. a
+    /// model picker or a working-directory selector). App-specific affordances
+    /// live here rather than in the crate.
+    #[props(default)]
+    pub input_accessory: Option<Element>,
     /// Fired when the user interacts with an inline [`InlineControl`].
     #[props(default)]
     pub on_action: EventHandler<ControlEvent>,
@@ -610,7 +651,12 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-attachment-label { color: var(--bulma-text, #363636); }
 .gc-attachment-remove { cursor: pointer; border: none; background: none; color: var(--bulma-text-weak, #7a7a7a); font-size: 1rem; line-height: 1; padding: 0 0.15rem; }
 .gc-attachment-remove:hover { color: var(--bulma-danger, #f14668); }
+.gc-input-accessory { display: flex; flex-wrap: wrap; align-items: center; gap: 0.4rem; margin-top: 0.4rem; }
 .gc-context-actions { display: flex; flex-wrap: wrap; gap: 0.15rem; margin-top: 0.3rem; }
+.gc-markdown > :first-child { margin-top: 0; }
+.gc-markdown > :last-child { margin-bottom: 0; }
+.gc-markdown pre { background: var(--bulma-scheme-main-bis, #f5f7fa); border-radius: 0.5rem; padding: 0.6rem 0.75rem; overflow-x: auto; font-size: 0.82rem; }
+.gc-markdown code { font-size: 0.85em; }
 .gc-context-btn { display: inline-flex; align-items: center; gap: 0.3rem; cursor: pointer; border: none; background: transparent; color: var(--bulma-text-weak, #7a7a7a); font-size: 0.76rem; padding: 0.2rem 0.4rem; border-radius: 0.4rem; line-height: 1; transition: background 0.12s ease, color 0.12s ease; }
 .gc-context-btn:hover:not(:disabled) { background: var(--bulma-scheme-main-bis, #f0f1f4); color: var(--bulma-text, #363636); }
 .gc-context-btn:disabled { opacity: 0.5; cursor: default; }
@@ -672,13 +718,24 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
         .title
         .clone()
         .unwrap_or_else(|| "Dioxus GenAI Chat".to_string());
-    let on_context = props.on_context;
-    let show_context_actions =
-        props.controls.allow_file_attachments || props.controls.allow_directory_context;
+    let theme = props.theme;
+    let embedded = props.embedded;
+
+    // The scoped `.gc-*` styles are needed in both modes. In embedded mode the
+    // host app owns Bulma + theming, so we skip `BulmaProvider` (no CDN CSS, no
+    // theme wrapper) and the standalone page chrome.
+    if embedded {
+        return rsx! {
+            style { dangerous_inner_html: CHAT_SURFACE_CSS }
+            div { class: "gc-surface gc-embedded",
+                ChatBody { ..props }
+            }
+        };
+    }
 
     rsx! {
         BulmaProvider {
-            theme: props.theme,
+            theme,
             load_bulma_css: true,
             style { dangerous_inner_html: CHAT_SURFACE_CSS }
             Section {
@@ -691,106 +748,188 @@ pub fn ChatSurface(props: ChatSurfaceProps) -> Element {
                             size: TitleSize::Is4,
                             "{title}"
                         }
+                        ChatBody { ..props }
+                    }
+                }
+            }
+        }
+    }
+}
 
-                        for (idx, message) in props.transcript.messages.iter().enumerate() {
-                            ChatBubble {
-                                key: "{idx}",
-                                message: message.clone(),
-                                on_action: props.on_action,
-                                render_document: props.render_document,
-                                on_document: props.on_document,
-                                document_selectable: props.controls.allow_document_selection,
-                            }
-                        }
+/// Render a Markdown payload to an HTML string.
+///
+/// With the `markdown` feature (on by default) this parses CommonMark (plus
+/// tables and strikethrough) via `pulldown-cmark`. Without it, the source is
+/// HTML-escaped and wrapped in a paragraph so raw markup is shown verbatim
+/// and never interpreted as HTML.
+#[cfg(feature = "markdown")]
+fn render_markdown(src: &str) -> String {
+    use pulldown_cmark::{Options, Parser, html};
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    options.insert(Options::ENABLE_STRIKETHROUGH);
+    let parser = Parser::new_ext(src, options);
+    let mut out = String::new();
+    html::push_html(&mut out, parser);
+    out
+}
 
-                        if props.controls.show_input {
-                            div {
-                                class: "gc-input-box",
-                                if !props.attachments.is_empty() {
-                                    div {
-                                        class: "gc-attachments",
-                                        for item in props.attachments.iter() {
-                                            {
-                                                let id = item.id.clone();
-                                                rsx! {
-                                                    span {
-                                                        key: "{item.id}",
-                                                        class: "gc-attachment",
-                                                        span { class: "gc-attachment-kind", "{context_kind_icon(item.kind)}" }
-                                                        span { class: "gc-attachment-label", "{item.label}" }
-                                                        button {
-                                                            class: "gc-attachment-remove",
-                                                            title: "Remove",
-                                                            onclick: move |_| on_context.call(ContextEvent::Remove(id.clone())),
-                                                            "×"
-                                                        }
-                                                    }
-                                                }
-                                            }
+#[cfg(not(feature = "markdown"))]
+fn render_markdown(src: &str) -> String {
+    let escaped = src
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;");
+    format!("<p>{escaped}</p>")
+}
+
+/// The transcript + composer, with no page chrome. Rendered directly in
+/// embedded mode, and inside the standalone `Box` otherwise.
+#[component]
+fn ChatBody(props: ChatSurfaceProps) -> Element {
+    let on_context = props.on_context;
+    let on_input = props.on_input;
+    let on_send = props.on_send;
+    let on_stop = props.on_stop;
+    let on_retry = props.on_retry;
+    let on_clear = props.on_clear;
+    let show_context_actions =
+        props.controls.allow_file_attachments || props.controls.allow_directory_context;
+    let input_enabled = props.controls.input_enabled;
+    let send_disabled = !input_enabled || props.input.trim().is_empty();
+
+    rsx! {
+        for (idx, message) in props.transcript.messages.iter().enumerate() {
+            ChatBubble {
+                key: "{idx}",
+                message: message.clone(),
+                on_action: props.on_action,
+                render_document: props.render_document,
+                on_document: props.on_document,
+                document_selectable: props.controls.allow_document_selection,
+            }
+        }
+
+        if props.controls.show_input {
+            div {
+                class: "gc-input-box",
+                if !props.attachments.is_empty() {
+                    div {
+                        class: "gc-attachments",
+                        for item in props.attachments.iter() {
+                            {
+                                let id = item.id.clone();
+                                rsx! {
+                                    span {
+                                        key: "{item.id}",
+                                        class: "gc-attachment",
+                                        span { class: "gc-attachment-kind", "{context_kind_icon(item.kind)}" }
+                                        span { class: "gc-attachment-label", "{item.label}" }
+                                        button {
+                                            class: "gc-attachment-remove",
+                                            title: "Remove",
+                                            onclick: move |_| on_context.call(ContextEvent::Remove(id.clone())),
+                                            "×"
                                         }
                                     }
-                                }
-                                Textarea {
-                                    value: String::new(),
-                                    placeholder: props.controls.placeholder.clone(),
-                                    rows: 3,
-                                    disabled: !props.controls.input_enabled,
-                                    readonly: !props.controls.input_enabled,
-                                }
-                                if show_context_actions {
-                                    div {
-                                        class: "gc-context-actions",
-                                        if props.controls.allow_file_attachments {
-                                            button {
-                                                class: "gc-context-btn",
-                                                disabled: !props.controls.input_enabled,
-                                                onclick: move |_| on_context.call(ContextEvent::AddFilesRequested),
-                                                "{props.controls.attach_files_label}"
-                                            }
-                                        }
-                                        if props.controls.allow_directory_context {
-                                            button {
-                                                class: "gc-context-btn",
-                                                disabled: !props.controls.input_enabled,
-                                                onclick: move |_| on_context.call(ContextEvent::AddDirectoryRequested),
-                                                "{props.controls.add_directory_label}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Buttons {
-                            if props.controls.show_send_button {
-                                Button {
-                                    color: BulmaColor::Primary,
-                                    "Send"
-                                }
-                            }
-                            if props.controls.show_stop_button {
-                                Button {
-                                    color: BulmaColor::Warning,
-                                    outlined: true,
-                                    "Stop"
-                                }
-                            }
-                            if props.controls.show_retry_button {
-                                Button {
-                                    color: BulmaColor::Info,
-                                    outlined: true,
-                                    "Retry"
-                                }
-                            }
-                            if props.controls.show_clear_button {
-                                Button {
-                                    color: BulmaColor::Danger,
-                                    outlined: true,
-                                    "Clear"
                                 }
                             }
                         }
                     }
+                }
+                // Native textarea (not the Bulma component) so we can bind a
+                // controlled value and handle Enter-to-send via `onkeydown`.
+                // Enter submits the controlled `input` value (the keydown event
+                // itself carries no text); Shift+Enter inserts a newline.
+                textarea {
+                    class: "textarea",
+                    value: "{props.input}",
+                    placeholder: "{props.controls.placeholder}",
+                    rows: 3,
+                    disabled: !input_enabled,
+                    oninput: move |evt| on_input.call(evt.value()),
+                    onkeydown: {
+                        let input = props.input.clone();
+                        move |evt: KeyboardEvent| {
+                            if input_enabled
+                                && evt.key() == Key::Enter
+                                && !evt.modifiers().shift()
+                            {
+                                evt.prevent_default();
+                                let text = input.trim();
+                                if !text.is_empty() {
+                                    on_send.call(text.to_string());
+                                }
+                            }
+                        }
+                    },
+                }
+                if let Some(accessory) = props.input_accessory.clone() {
+                    div { class: "gc-input-accessory", {accessory} }
+                }
+                if show_context_actions {
+                    div {
+                        class: "gc-context-actions",
+                        if props.controls.allow_file_attachments {
+                            button {
+                                class: "gc-context-btn",
+                                disabled: !input_enabled,
+                                onclick: move |_| on_context.call(ContextEvent::AddFilesRequested),
+                                "{props.controls.attach_files_label}"
+                            }
+                        }
+                        if props.controls.allow_directory_context {
+                            button {
+                                class: "gc-context-btn",
+                                disabled: !input_enabled,
+                                onclick: move |_| on_context.call(ContextEvent::AddDirectoryRequested),
+                                "{props.controls.add_directory_label}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Buttons {
+            if props.controls.show_send_button {
+                Button {
+                    color: BulmaColor::Primary,
+                    disabled: send_disabled,
+                    onclick: {
+                        let input = props.input.clone();
+                        move |_| {
+                            let text = input.trim();
+                            if !text.is_empty() {
+                                on_send.call(text.to_string());
+                            }
+                        }
+                    },
+                    "Send"
+                }
+            }
+            if props.controls.show_stop_button {
+                Button {
+                    color: BulmaColor::Warning,
+                    outlined: true,
+                    onclick: move |_| on_stop.call(()),
+                    "Stop"
+                }
+            }
+            if props.controls.show_retry_button {
+                Button {
+                    color: BulmaColor::Info,
+                    outlined: true,
+                    onclick: move |_| on_retry.call(()),
+                    "Retry"
+                }
+            }
+            if props.controls.show_clear_button {
+                Button {
+                    color: BulmaColor::Danger,
+                    outlined: true,
+                    onclick: move |_| on_clear.call(()),
+                    "Clear"
                 }
             }
         }
@@ -824,8 +963,14 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
             div {
                 class: "gc-body",
                 {match &props.message.payload {
-                    ChatMessagePayload::Text(content) | ChatMessagePayload::Markdown(content) => rsx! {
+                    ChatMessagePayload::Text(content) => rsx! {
                         p { "{content}" }
+                    },
+                    ChatMessagePayload::Markdown(content) => rsx! {
+                        div {
+                            class: "gc-markdown content",
+                            dangerous_inner_html: render_markdown(content),
+                        }
                     },
                     ChatMessagePayload::Reasoning(reasoning) => rsx! {
                         ReasoningPanel { reasoning: reasoning.clone() }

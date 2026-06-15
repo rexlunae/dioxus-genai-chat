@@ -1,6 +1,6 @@
 [package]
 name = "dioxus-genai-chat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 description = "A configurable Dioxus + Bulma chat UI with chained reasoning timelines, inline controls, and optional genai integration."
 authors = ["Erica Stith <rexlunae@gmail.com>"]
@@ -18,12 +18,16 @@ dioxus-bulma = "0.7.3"
 # Optional: genai pulls in tokio networking features that don't build on wasm,
 # so it is gated behind a feature to allow a web/wasm build of the UI.
 genai = { version = "0.2", optional = true }
+# Renders the `Markdown` message payload to HTML. Pure Rust, builds on wasm.
+pulldown-cmark = { version = "0.12", default-features = false, features = ["html"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [features]
-default = ["genai"]
+default = ["genai", "markdown"]
 genai = ["dep:genai"]
+# Render `ChatMessagePayload::Markdown` as formatted HTML rather than raw text.
+markdown = ["dep:pulldown-cmark"]
 
 [dev-dependencies]
 pretty_assertions = "1"

@@ -1,7 +1,7 @@
 use dioxus::prelude::*;
 use dioxus_genai_chat::{
-    ChatControls, ChatSurface, ContextEvent, ContextItem, ControlEvent, ControlValue,
-    DocumentEvent, sample_transcript,
+    ChatControls, ChatMessagePayload, ChatRole, ChatSurface, ChatTranscript, ContextEvent,
+    ContextItem, ControlEvent, ControlValue, DocumentEvent, sample_transcript,
 };
 
 fn main() {
@@ -14,6 +14,10 @@ fn App() -> Element {
     // The caller owns the list of attached context — the chat surface is controlled.
     let mut attachments = use_signal(Vec::<ContextItem>::new);
     let mut next_id = use_signal(|| 0u32);
+    // The transcript and composer input are controlled too: the surface renders
+    // them and emits events; the app owns the state.
+    let mut transcript = use_signal(sample_transcript);
+    let mut input = use_signal(String::new);
 
     // Enable the file/directory affordances and document selection (off by default).
     let controls = ChatControls {
@@ -25,9 +29,21 @@ fn App() -> Element {
 
     rsx! {
         ChatSurface {
-            transcript: sample_transcript(),
+            transcript: transcript(),
             controls,
             title: "Dioxus GenAI Chat Demo".to_string(),
+            input: input(),
+            on_input: move |value: String| input.set(value),
+            on_send: move |text: String| {
+                // Echo the user's message into the transcript, then clear the box.
+                transcript.write().push(ChatRole::User, ChatMessagePayload::Markdown(text.clone()));
+                input.set(String::new());
+                last_action.set(format!("Last action: sent `{text}`"));
+            },
+            on_clear: move |_| {
+                transcript.set(ChatTranscript::default());
+                last_action.set("Last action: cleared the transcript".to_string());
+            },
             attachments: attachments(),
             on_action: move |event: ControlEvent| {
                 let summary = match event.value {
