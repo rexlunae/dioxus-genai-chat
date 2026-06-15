@@ -228,6 +228,54 @@ pub enum ContextEvent {
     Remove(String),
 }
 
+/// The role of a single line in a [`FileDiff`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DiffKind {
+    /// An added line (rendered green, prefixed `+`).
+    Added,
+    /// A removed line (rendered red, prefixed `-`).
+    Removed,
+    /// An unchanged context line.
+    Context,
+}
+
+/// A single line within a unified [`FileDiff`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiffLine {
+    pub kind: DiffKind,
+    pub content: String,
+}
+
+impl DiffLine {
+    pub fn added(content: impl Into<String>) -> Self {
+        Self { kind: DiffKind::Added, content: content.into() }
+    }
+
+    pub fn removed(content: impl Into<String>) -> Self {
+        Self { kind: DiffKind::Removed, content: content.into() }
+    }
+
+    pub fn context(content: impl Into<String>) -> Self {
+        Self { kind: DiffKind::Context, content: content.into() }
+    }
+}
+
+/// A unified diff for a single file, rendered with an apply animation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FileDiff {
+    /// File path shown in the diff header.
+    pub path: String,
+    pub lines: Vec<DiffLine>,
+    /// When `true`, changed lines stream in (staggered) and flash on apply.
+    /// Set `false` to render the final state with no animation.
+    #[serde(default = "default_true")]
+    pub animate: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ChatMessagePayload {
     Text(String),
@@ -241,6 +289,8 @@ pub enum ChatMessagePayload {
     Status(String),
     /// A row of inline controls (buttons / selectors / toggles).
     Controls(Vec<InlineControl>),
+    /// A unified file diff, optionally animated as it is applied.
+    Diff(FileDiff),
     Typing,
     Error(String),
 }
@@ -310,6 +360,7 @@ impl ChatTranscript {
                 | (_, ChatMessagePayload::Reasoning(_))
                 | (_, ChatMessagePayload::Status(_))
                 | (_, ChatMessagePayload::Controls(_))
+                | (_, ChatMessagePayload::Diff(_))
                 | (_, ChatMessagePayload::Typing) => {}
             }
         }
@@ -441,9 +492,29 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-attachment-remove { cursor: pointer; border: none; background: none; color: var(--bulma-text-weak, #7a7a7a); font-size: 1rem; line-height: 1; padding: 0 0.15rem; }
 .gc-attachment-remove:hover { color: var(--bulma-danger, #f14668); }
 .gc-context-actions { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 0.5rem; }
+.gc-diff { border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.6rem; overflow: hidden; font-size: 0.8rem; }
+.gc-diff-header { display: flex; align-items: center; gap: 0.6rem; padding: 0.4rem 0.7rem; background: var(--bulma-scheme-main-bis, #f5f7fa); border-bottom: 1px solid var(--bulma-border-weak, #ededed); }
+.gc-diff-file { font-family: monospace; font-weight: 600; color: var(--bulma-text, #363636); }
+.gc-diff-stat-add { color: #257953; font-weight: 600; }
+.gc-diff-stat-del { color: #c81e4b; font-weight: 600; }
+.gc-diff-body { font-family: monospace; padding: 0.3rem 0; overflow-x: auto; }
+.gc-diff-line { display: flex; gap: 0.5rem; padding: 0 0.7rem; white-space: pre; line-height: 1.5; }
+.gc-diff-gutter { width: 0.8rem; text-align: center; flex: none; color: var(--bulma-text-weak, #b5b5b5); user-select: none; }
+.gc-diff-code { flex: 1 1 auto; }
+.gc-diff-added { background: rgba(72, 199, 142, 0.14); box-shadow: inset 2px 0 0 #48c78e; }
+.gc-diff-added .gc-diff-gutter { color: #257953; }
+.gc-diff-removed { background: rgba(241, 70, 104, 0.14); box-shadow: inset 2px 0 0 #f14668; }
+.gc-diff-removed .gc-diff-gutter { color: #c81e4b; }
+.gc-diff-context { color: var(--bulma-text-weak, #7a7a7a); }
+.gc-diff-animate { animation: gc-diff-reveal 0.28s ease both; }
+.gc-diff-animate.gc-diff-added { animation: gc-diff-reveal 0.28s ease both, gc-flash-add 1.1s ease; }
+.gc-diff-animate.gc-diff-removed { animation: gc-diff-reveal 0.28s ease both, gc-flash-remove 1.1s ease; }
 
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @keyframes gc-spin { to { transform: rotate(360deg); } }
+@keyframes gc-diff-reveal { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+@keyframes gc-flash-add { 0% { background: rgba(72, 199, 142, 0.55); } 100% { background: rgba(72, 199, 142, 0.14); } }
+@keyframes gc-flash-remove { 0% { background: rgba(241, 70, 104, 0.55); } 100% { background: rgba(241, 70, 104, 0.14); } }
 "#;
 
 #[component]
@@ -612,6 +683,9 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                     ChatMessagePayload::Controls(controls) => rsx! {
                         ControlBar { controls: controls.clone(), on_action: props.on_action }
                     },
+                    ChatMessagePayload::Diff(diff) => rsx! {
+                        DiffView { diff: diff.clone() }
+                    },
                     ChatMessagePayload::Typing => rsx! {
                         div {
                             class: "gc-status",
@@ -760,6 +834,77 @@ fn control_style_class(style: ControlStyle) -> &'static str {
         ControlStyle::Neutral => "",
         ControlStyle::Danger => "is-danger is-light",
         ControlStyle::Ghost => "is-ghost",
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct DiffViewProps {
+    diff: FileDiff,
+}
+
+/// Renders a unified file diff. When `diff.animate` is set, changed lines stream
+/// in top-to-bottom (staggered) and flash green/red as they are "applied".
+#[component]
+fn DiffView(props: DiffViewProps) -> Element {
+    let diff = &props.diff;
+    let animate = diff.animate;
+    let added = diff.lines.iter().filter(|l| l.kind == DiffKind::Added).count();
+    let removed = diff.lines.iter().filter(|l| l.kind == DiffKind::Removed).count();
+
+    rsx! {
+        div {
+            class: "gc-diff",
+            div {
+                class: "gc-diff-header",
+                span { class: "gc-diff-file", "{diff.path}" }
+                span { class: "gc-diff-stat-add", "+{added}" }
+                span { class: "gc-diff-stat-del", "-{removed}" }
+            }
+            div {
+                class: "gc-diff-body",
+                for (idx, line) in diff.lines.iter().enumerate() {
+                    {
+                        let kind = line.kind;
+                        let class = if animate {
+                            format!("gc-diff-line gc-diff-{} gc-diff-animate", diff_kind_slug(kind))
+                        } else {
+                            format!("gc-diff-line gc-diff-{}", diff_kind_slug(kind))
+                        };
+                        // Stagger the reveal so the diff appears to apply top-to-bottom.
+                        let style = if animate {
+                            format!("animation-delay: {}ms", idx * 45)
+                        } else {
+                            String::new()
+                        };
+                        rsx! {
+                            div {
+                                key: "{idx}",
+                                class: "{class}",
+                                style: "{style}",
+                                span { class: "gc-diff-gutter", "{diff_sign(kind)}" }
+                                span { class: "gc-diff-code", "{line.content}" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn diff_kind_slug(kind: DiffKind) -> &'static str {
+    match kind {
+        DiffKind::Added => "added",
+        DiffKind::Removed => "removed",
+        DiffKind::Context => "context",
+    }
+}
+
+fn diff_sign(kind: DiffKind) -> &'static str {
+    match kind {
+        DiffKind::Added => "+",
+        DiffKind::Removed => "-",
+        DiffKind::Context => " ",
     }
 }
 
@@ -918,6 +1063,19 @@ pub fn sample_transcript() -> ChatTranscript {
         ChatMessagePayload::Markdown(
             "### Summary\n- Error rate improved by **14%**\n- Latency remained stable".to_string(),
         ),
+    );
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::Diff(FileDiff {
+            path: "src/alerts.rs".to_string(),
+            animate: true,
+            lines: vec![
+                DiffLine::context("fn alert_threshold() -> f32 {"),
+                DiffLine::removed("    0.20 // 20% error rate"),
+                DiffLine::added("    0.14 // tightened after telemetry review"),
+                DiffLine::context("}"),
+            ],
+        }),
     );
     transcript.push(
         ChatRole::Assistant,
