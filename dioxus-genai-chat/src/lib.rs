@@ -59,11 +59,107 @@ impl ToolCallStatus {
     }
 }
 
+/// Semantic hint about a tool call, enabling tool-specific rendering.
+///
+/// The consumer populates this from the tool name and arguments so the
+/// library can render a richer, tool-aware UI without importing tool
+/// definitions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToolCallHint {
+    /// File read: show path, optional line range.
+    FileRead {
+        path: String,
+        #[serde(default)]
+        start_line: Option<u32>,
+        #[serde(default)]
+        end_line: Option<u32>,
+    },
+    /// File write/create: show path, optionally the line count.
+    FileWrite {
+        path: String,
+        #[serde(default)]
+        lines: Option<u32>,
+    },
+    /// File edit: show path.
+    FileEdit { path: String },
+    /// Shell command: show the command (possibly truncated).
+    Shell {
+        command: String,
+        #[serde(default)]
+        working_dir: Option<String>,
+    },
+    /// Text search (grep-like): show pattern and scope.
+    Search {
+        pattern: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// File name search (find/glob): show the query.
+    FindFiles {
+        query: String,
+        #[serde(default)]
+        path: Option<String>,
+    },
+    /// Web search: show the query.
+    WebSearch { query: String },
+    /// Web fetch/browse: show the URL.
+    WebFetch { url: String },
+    /// Memory operation: show a brief label.
+    Memory { action: String },
+    /// Any other tool: fall back to generic display.
+    Other,
+}
+
+impl Default for ToolCallHint {
+    fn default() -> Self {
+        Self::Other
+    }
+}
+
+/// A single match in a search result, for structured rendering.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchMatch {
+    pub path: String,
+    pub line: u32,
+    pub content: String,
+}
+
+/// How to render the tool result when richer than plain text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToolResultHint {
+    /// Render as a file diff (reuse the existing `DiffView` component).
+    Diff(FileDiff),
+    /// Render as a code block with a file header.
+    Code {
+        path: String,
+        content: String,
+        #[serde(default)]
+        language: Option<String>,
+    },
+    /// Render as a terminal output block with exit code.
+    Terminal {
+        #[serde(default)]
+        exit_code: Option<i32>,
+        output: String,
+    },
+    /// Render as a list of search matches.
+    SearchMatches(Vec<SearchMatch>),
+    /// Plain text (default, same as today).
+    Plain(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub name: String,
     pub arguments: Value,
     pub status: ToolCallStatus,
+    /// Semantic hint for tool-specific rendering; defaults to `Other`
+    /// (generic display) for backward compatibility.
+    #[serde(default)]
+    pub hint: ToolCallHint,
+    /// Optional structured result for richer rendering.
+    #[serde(default)]
+    pub result_hint: Option<ToolResultHint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -704,6 +800,46 @@ const CHAT_SURFACE_CSS: &str = r#"
 .gc-pdf { width: 80vw; max-width: 900px; height: 75vh; border: none; }
 .gc-doc-link { display: inline-block; margin-top: 0.6rem; font-size: 0.85rem; color: var(--bulma-link, #485fc7); }
 
+.gc-tool { border: 1px solid var(--bulma-border-weak, #ededed); border-radius: 0.6rem; margin-bottom: 0.5rem; font-size: 0.78rem; overflow: hidden; background: var(--bulma-scheme-main, #fff); }
+.gc-tool-summary { cursor: pointer; display: flex; align-items: center; gap: 0.5rem; padding: 0.45rem 0.7rem; list-style: none; font-size: 0.78rem; color: var(--bulma-text, #363636); user-select: none; }
+.gc-tool-summary::-webkit-details-marker { display: none; }
+.gc-tool .gc-chevron { width: 0; height: 0; border-left: 4px solid var(--bulma-text-weak, #b5b5b5); border-top: 3px solid transparent; border-bottom: 3px solid transparent; transition: transform .15s ease; flex: none; }
+.gc-tool[open] .gc-chevron { transform: rotate(90deg); }
+.gc-tool-icon { font-size: 0.85rem; line-height: 1; flex: none; }
+.gc-tool-param { font-family: monospace; font-size: 0.78rem; color: var(--bulma-text, #363636); font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30ch; }
+.gc-tool-param-secondary { color: var(--bulma-text-weak, #7a7a7a); font-weight: 400; font-size: 0.72rem; margin-left: 0.25rem; }
+.gc-tool-status { margin-left: auto; flex: none; }
+.gc-status-dot { width: 0.45rem; height: 0.45rem; border-radius: 50%; display: inline-block; flex: none; }
+.gc-status-dot-pending { background: #b5b5b5; animation: gc-pulse 1.5s ease-in-out infinite; }
+.gc-status-dot-running { background: var(--bulma-info, #3e8ed0); animation: gc-pulse 1.2s ease-in-out infinite; }
+.gc-status-dot-done { background: var(--bulma-success, #48c78e); }
+.gc-status-dot-failed { background: var(--bulma-danger, #f14668); }
+.gc-tool-detail { padding: 0.5rem 0.7rem; border-top: 1px solid var(--bulma-border-weak, #ededed); background: var(--bulma-scheme-main-bis, #f8f9fb); }
+.gc-tool-raw { margin: 0; }
+
+.gc-terminal { background: #1e1e1e; color: #d4d4d4; border-radius: 0.5rem; padding: 0.6rem 0.75rem; font-family: monospace; font-size: 0.78rem; overflow-x: auto; white-space: pre-wrap; word-break: break-all; }
+.gc-terminal-prompt { color: #48c78e; font-weight: 600; }
+.gc-terminal-exit { display: inline-block; font-size: 0.65rem; padding: 0.05rem 0.35rem; border-radius: 999px; margin-left: 0.5rem; font-weight: 600; }
+.gc-terminal-exit-ok { background: rgba(72,199,142,.25); color: #48c78e; }
+.gc-terminal-exit-err { background: rgba(241,70,104,.25); color: #f14668; }
+
+.gc-matches { margin: 0; padding: 0; list-style: none; }
+.gc-match { display: flex; gap: 0.4rem; padding: 0.15rem 0; font-size: 0.78rem; font-family: monospace; align-items: baseline; }
+.gc-match-path { color: var(--bulma-link, #485fc7); font-weight: 500; white-space: nowrap; }
+.gc-match-line { color: var(--bulma-text-weak, #7a7a7a); min-width: 3ch; text-align: right; white-space: nowrap; }
+.gc-match-sep { color: var(--bulma-text-weak, #b5b5b5); }
+.gc-match-content { color: var(--bulma-text, #363636); white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+.gc-match-count { font-size: 0.7rem; color: var(--bulma-text-weak, #7a7a7a); margin-left: 0.3rem; white-space: nowrap; }
+
+.gc-code-block { font-family: monospace; font-size: 0.78rem; background: var(--bulma-scheme-main-bis, #f5f7fa); border-radius: 0.5rem; padding: 0.4rem 0; overflow-x: auto; }
+.gc-code-block-line { display: flex; line-height: 1.55; }
+.gc-line-no { color: var(--bulma-text-weak, #b5b5b5); text-align: right; padding: 0 0.6rem 0 0.4rem; user-select: none; min-width: 3ch; flex: none; }
+.gc-line-content { white-space: pre; padding-right: 0.5rem; }
+
+.gc-file-header { display: flex; align-items: center; gap: 0.4rem; font-family: monospace; font-size: 0.78rem; font-weight: 600; color: var(--bulma-text, #363636); margin-bottom: 0.3rem; }
+
+.gc-tool-result-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.03em; font-weight: 600; color: var(--bulma-text-weak, #7a7a7a); margin-top: 0.5rem; margin-bottom: 0.25rem; }
+
 @keyframes gc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
 @keyframes gc-fade-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes gc-spin { to { transform: rotate(360deg); } }
@@ -1017,36 +1153,11 @@ fn ChatBubble(props: ChatBubbleProps) -> Element {
                             }
                         }
                     },
-                    ChatMessagePayload::ToolCall(call) => {
-                        let args = serde_json::to_string_pretty(&call.arguments)
-                            .unwrap_or_else(|_| call.arguments.to_string());
-                        let running = matches!(call.status, ToolCallStatus::Running);
-                        rsx! {
-                            div {
-                                div {
-                                    class: "gc-tool-line",
-                                    span { class: "gc-tool-name", "{call.name}" }
-                                    if running {
-                                        span { class: "gc-spinner gc-spinner-sm" }
-                                    }
-                                    span {
-                                        class: "gc-chip gc-chip-{step_slug(tool_step_status(&call.status))}",
-                                        "{call.status.as_label()}"
-                                    }
-                                }
-                                pre { class: "gc-code", "{args}" }
-                            }
-                        }
-                    }
+                    ChatMessagePayload::ToolCall(call) => rsx! {
+                        ToolCallPanel { call: call.clone() }
+                    },
                     ChatMessagePayload::ToolResult { name, content } => rsx! {
-                        div {
-                            div {
-                                class: "gc-tool-line",
-                                span { class: "gc-tool-name", "{name}" }
-                                span { class: "gc-chip gc-chip-done", "result" }
-                            }
-                            pre { class: "gc-code", "{content}" }
-                        }
+                        ToolResultPanel { name: name.clone(), content: content.clone() }
                     },
                 }}
             }
@@ -1215,6 +1326,334 @@ fn diff_sign(kind: DiffKind) -> &'static str {
         DiffKind::Added => "+",
         DiffKind::Removed => "-",
         DiffKind::Context => " ",
+    }
+}
+
+// ── Tool call panel ─────────────────────────────────────────────────────────
+
+fn tool_hint_icon(hint: &ToolCallHint) -> &'static str {
+    match hint {
+        ToolCallHint::FileRead { .. } => "📄",
+        ToolCallHint::FileWrite { .. } => "📝",
+        ToolCallHint::FileEdit { .. } => "✏️",
+        ToolCallHint::Shell { .. } => ">_",
+        ToolCallHint::Search { .. } | ToolCallHint::FindFiles { .. } => "🔍",
+        ToolCallHint::WebSearch { .. } => "🌐",
+        ToolCallHint::WebFetch { .. } => "🌐",
+        ToolCallHint::Memory { .. } => "🧠",
+        ToolCallHint::Other => "🔧",
+    }
+}
+
+fn tool_hint_summary(name: &str, hint: &ToolCallHint) -> (String, Option<String>) {
+    match hint {
+        ToolCallHint::FileRead { path, start_line, end_line } => {
+            let range = match (start_line, end_line) {
+                (Some(s), Some(e)) => format!(" (lines {s}\u{2013}{e})"),
+                (Some(s), None) => format!(" (from line {s})"),
+                _ => String::new(),
+            };
+            (format!("{name} \u{00b7} {path}{range}"), None)
+        }
+        ToolCallHint::FileWrite { path, lines } => {
+            let extra = lines.map(|n| format!("{n} lines"));
+            (format!("{name} \u{00b7} {path}"), extra)
+        }
+        ToolCallHint::FileEdit { path } => (format!("{name} \u{00b7} {path}"), None),
+        ToolCallHint::Shell { command, .. } => {
+            let cmd = if command.len() > 60 {
+                format!("{}…", &command[..60])
+            } else {
+                command.clone()
+            };
+            (format!("{name} \u{00b7} {cmd}"), None)
+        }
+        ToolCallHint::Search { pattern, path } => {
+            let scope = path.as_deref().unwrap_or("");
+            let label = if scope.is_empty() {
+                format!("{name} \u{00b7} \"{pattern}\"")
+            } else {
+                format!("{name} \u{00b7} \"{pattern}\" in {scope}")
+            };
+            (label, None)
+        }
+        ToolCallHint::FindFiles { query, path } => {
+            let scope = path.as_deref().unwrap_or("");
+            let label = if scope.is_empty() {
+                format!("{name} \u{00b7} \"{query}\"")
+            } else {
+                format!("{name} \u{00b7} \"{query}\" in {scope}")
+            };
+            (label, None)
+        }
+        ToolCallHint::WebSearch { query } => (format!("{name} \u{00b7} \"{query}\""), None),
+        ToolCallHint::WebFetch { url } => {
+            let display = if url.len() > 60 {
+                format!("{}…", &url[..60])
+            } else {
+                url.clone()
+            };
+            (format!("{name} \u{00b7} {display}"), None)
+        }
+        ToolCallHint::Memory { action } => (format!("{name} \u{00b7} {action}"), None),
+        ToolCallHint::Other => (name.to_string(), None),
+    }
+}
+
+fn status_dot_class(status: &ToolCallStatus) -> &'static str {
+    match status {
+        ToolCallStatus::Pending => "gc-status-dot gc-status-dot-pending",
+        ToolCallStatus::Running => "gc-status-dot gc-status-dot-running",
+        ToolCallStatus::Completed => "gc-status-dot gc-status-dot-done",
+        ToolCallStatus::Failed => "gc-status-dot gc-status-dot-failed",
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ToolCallPanelProps {
+    call: ToolCall,
+}
+
+#[component]
+fn ToolCallPanel(props: ToolCallPanelProps) -> Element {
+    let call = &props.call;
+    let icon = tool_hint_icon(&call.hint);
+    let (summary, extra) = tool_hint_summary(&call.name, &call.hint);
+    let dot_class = status_dot_class(&call.status);
+    let is_running = matches!(call.status, ToolCallStatus::Running);
+
+    rsx! {
+        details {
+            class: "gc-tool",
+            open: is_running,
+            summary {
+                class: "gc-tool-summary",
+                span { class: "gc-chevron" }
+                if is_running {
+                    span { class: "gc-spinner gc-spinner-sm" }
+                }
+                span { class: "gc-tool-icon", "{icon}" }
+                span { class: "gc-tool-param", "{summary}" }
+                if let Some(extra_text) = &extra {
+                    span { class: "gc-tool-param-secondary", "{extra_text}" }
+                }
+                span { class: "gc-tool-status",
+                    span { class: "{dot_class}" }
+                }
+            }
+            div {
+                class: "gc-tool-detail",
+                ToolCallDetail { call: call.clone() }
+                if let Some(result_hint) = &call.result_hint {
+                    ToolResultDetail { hint: result_hint.clone() }
+                }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ToolCallDetailProps {
+    call: ToolCall,
+}
+
+#[component]
+fn ToolCallDetail(props: ToolCallDetailProps) -> Element {
+    let call = &props.call;
+    match &call.hint {
+        ToolCallHint::Shell { command, working_dir } => rsx! {
+            div { class: "gc-terminal",
+                if let Some(wd) = working_dir {
+                    span { class: "gc-muted", "{wd} " }
+                }
+                span { class: "gc-terminal-prompt", "$ " }
+                "{command}"
+            }
+        },
+        ToolCallHint::FileRead { path, start_line, end_line } => {
+            let range = match (start_line, end_line) {
+                (Some(s), Some(e)) => format!("lines {s}\u{2013}{e}"),
+                (Some(s), None) => format!("from line {s}"),
+                _ => String::new(),
+            };
+            rsx! {
+                div { class: "gc-file-header",
+                    "📄 {path}"
+                    if !range.is_empty() {
+                        span { class: "gc-tool-param-secondary", "{range}" }
+                    }
+                }
+            }
+        }
+        ToolCallHint::FileWrite { path, lines } => rsx! {
+            div { class: "gc-file-header",
+                "📝 {path}"
+                if let Some(n) = lines {
+                    span { class: "gc-tool-param-secondary", "{n} lines" }
+                }
+            }
+        },
+        ToolCallHint::FileEdit { path } => rsx! {
+            div { class: "gc-file-header", "✏️ {path}" }
+        },
+        ToolCallHint::Search { pattern, path } => rsx! {
+            div { class: "gc-file-header",
+                "🔍 Pattern: "
+                span { class: "gc-tool-param", "\"{pattern}\"" }
+                if let Some(scope) = path {
+                    span { class: "gc-tool-param-secondary", " in {scope}" }
+                }
+            }
+        },
+        ToolCallHint::FindFiles { query, path } => rsx! {
+            div { class: "gc-file-header",
+                "🔍 "
+                span { class: "gc-tool-param", "\"{query}\"" }
+                if let Some(scope) = path {
+                    span { class: "gc-tool-param-secondary", " in {scope}" }
+                }
+            }
+        },
+        ToolCallHint::WebSearch { query } => rsx! {
+            div { class: "gc-file-header",
+                "🌐 Query: "
+                span { class: "gc-tool-param", "\"{query}\"" }
+            }
+        },
+        ToolCallHint::WebFetch { url } => rsx! {
+            div { class: "gc-file-header",
+                "🌐 "
+                span { class: "gc-tool-param", "{url}" }
+            }
+        },
+        _ => {
+            let args = serde_json::to_string_pretty(&call.arguments)
+                .unwrap_or_else(|_| call.arguments.to_string());
+            rsx! {
+                pre { class: "gc-code gc-tool-raw", "{args}" }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ToolResultDetailProps {
+    hint: ToolResultHint,
+}
+
+#[component]
+fn ToolResultDetail(props: ToolResultDetailProps) -> Element {
+    match &props.hint {
+        ToolResultHint::Diff(diff) => rsx! {
+            div { class: "gc-tool-result-label", "Result" }
+            DiffView { diff: diff.clone() }
+        },
+        ToolResultHint::Code { path, content, .. } => {
+            let numbered: Vec<(usize, &str)> = content
+                .lines()
+                .enumerate()
+                .map(|(i, l)| (i + 1, l))
+                .collect();
+            rsx! {
+                div { class: "gc-tool-result-label", "Result" }
+                div { class: "gc-file-header", "📄 {path}" }
+                div { class: "gc-code-block",
+                    for (line_no, line) in numbered.iter() {
+                        div {
+                            key: "{line_no}",
+                            class: "gc-code-block-line",
+                            span { class: "gc-line-no", "{line_no}" }
+                            span { class: "gc-line-content", "{line}" }
+                        }
+                    }
+                }
+            }
+        }
+        ToolResultHint::Terminal { exit_code, output } => {
+            let exit_class = match exit_code {
+                Some(0) => "gc-terminal-exit gc-terminal-exit-ok",
+                Some(_) => "gc-terminal-exit gc-terminal-exit-err",
+                None => "gc-terminal-exit gc-terminal-exit-ok",
+            };
+            let exit_label = match exit_code {
+                Some(code) => format!("exit {code}"),
+                None => "running".to_string(),
+            };
+            rsx! {
+                div { class: "gc-tool-result-label", "Output" }
+                div { class: "gc-terminal",
+                    "{output}"
+                    span { class: "{exit_class}", "{exit_label}" }
+                }
+            }
+        }
+        ToolResultHint::SearchMatches(matches) => {
+            let count = matches.len();
+            rsx! {
+                div { class: "gc-tool-result-label",
+                    "Result"
+                    span { class: "gc-match-count", "({count} matches)" }
+                }
+                ul { class: "gc-matches",
+                    for (i, m) in matches.iter().enumerate() {
+                        li {
+                            key: "{i}",
+                            class: "gc-match",
+                            span { class: "gc-match-path", "{m.path}" }
+                            span { class: "gc-match-sep", ":" }
+                            span { class: "gc-match-line", "{m.line}" }
+                            span { class: "gc-match-sep", ":" }
+                            span { class: "gc-match-content", "{m.content}" }
+                        }
+                    }
+                }
+            }
+        }
+        ToolResultHint::Plain(text) => rsx! {
+            div { class: "gc-tool-result-label", "Result" }
+            pre { class: "gc-code gc-tool-raw", "{text}" }
+        },
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct ToolResultPanelProps {
+    name: String,
+    content: String,
+}
+
+#[component]
+fn ToolResultPanel(props: ToolResultPanelProps) -> Element {
+    let content = &props.content;
+    let truncated = if content.len() > 500 {
+        format!("{}…", &content[..500])
+    } else {
+        content.clone()
+    };
+    rsx! {
+        details {
+            class: "gc-tool",
+            summary {
+                class: "gc-tool-summary",
+                span { class: "gc-chevron" }
+                span { class: "gc-tool-icon", "↩" }
+                span { class: "gc-tool-param", "{props.name}" }
+                span { class: "gc-tool-param-secondary", "result" }
+                span { class: "gc-tool-status",
+                    span { class: "gc-status-dot gc-status-dot-done" }
+                }
+            }
+            div {
+                class: "gc-tool-detail",
+                pre { class: "gc-code gc-tool-raw", "{truncated}" }
+                if content.len() > 500 {
+                    details {
+                        summary { class: "gc-muted", "Show full output" }
+                        pre { class: "gc-code gc-tool-raw", "{content}" }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1517,14 +1956,7 @@ fn step_marker(status: StepStatus) -> &'static str {
     }
 }
 
-fn tool_step_status(status: &ToolCallStatus) -> StepStatus {
-    match status {
-        ToolCallStatus::Pending => StepStatus::Pending,
-        ToolCallStatus::Running => StepStatus::Active,
-        ToolCallStatus::Completed => StepStatus::Done,
-        ToolCallStatus::Failed => StepStatus::Failed,
-    }
-}
+
 
 pub fn sample_transcript() -> ChatTranscript {
     let mut transcript = ChatTranscript::default();
@@ -1551,12 +1983,120 @@ pub fn sample_transcript() -> ChatTranscript {
             ],
         }),
     );
+    // File read with result hint
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "src/alerts.rs", "start_line": 1, "end_line": 12}),
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::FileRead {
+                path: "src/alerts.rs".to_string(),
+                start_line: Some(1),
+                end_line: Some(12),
+            },
+            result_hint: Some(ToolResultHint::Code {
+                path: "src/alerts.rs".to_string(),
+                content: "use std::time::Duration;\n\nconst THRESHOLD: f32 = 0.20;\n\nfn alert_threshold() -> f32 {\n    THRESHOLD\n}\n\nfn check_alerts(rate: f32) -> bool {\n    rate > alert_threshold()\n}".to_string(),
+                language: Some("rust".to_string()),
+            }),
+        }),
+    );
+    // Shell command with terminal result
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "execute_command".to_string(),
+            arguments: serde_json::json!({"command": "cargo build --release"}),
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::Shell {
+                command: "cargo build --release".to_string(),
+                working_dir: Some("/home/user/project".to_string()),
+            },
+            result_hint: Some(ToolResultHint::Terminal {
+                exit_code: Some(0),
+                output: "   Compiling rustyclaw v0.4.0\n   Compiling rustyclaw-core v0.4.0\n    Finished release [optimized] target(s) in 42.3s".to_string(),
+            }),
+        }),
+    );
+    // Search with matches
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "search_files".to_string(),
+            arguments: serde_json::json!({"pattern": "TODO", "path": "src/"}),
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::Search {
+                pattern: "TODO".to_string(),
+                path: Some("src/".to_string()),
+            },
+            result_hint: Some(ToolResultHint::SearchMatches(vec![
+                SearchMatch { path: "src/main.rs".to_string(), line: 42, content: "// TODO: handle edge case for empty input".to_string() },
+                SearchMatch { path: "src/lib.rs".to_string(), line: 108, content: "// TODO: add integration tests".to_string() },
+                SearchMatch { path: "src/utils.rs".to_string(), line: 7, content: "// TODO: optimize this hot path".to_string() },
+            ])),
+        }),
+    );
+    // Edit with diff result
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "edit_file".to_string(),
+            arguments: serde_json::json!({"path": "src/alerts.rs", "old_string": "0.20", "new_string": "0.14"}),
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::FileEdit {
+                path: "src/alerts.rs".to_string(),
+            },
+            result_hint: Some(ToolResultHint::Diff(FileDiff {
+                path: "src/alerts.rs".to_string(),
+                animate: false,
+                lines: vec![
+                    DiffLine::context("fn alert_threshold() -> f32 {"),
+                    DiffLine::removed("    0.20 // 20% error rate"),
+                    DiffLine::added("    0.14 // tightened after telemetry review"),
+                    DiffLine::context("}"),
+                ],
+            })),
+        }),
+    );
+    // Web search
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "web_search".to_string(),
+            arguments: serde_json::json!({"query": "rust error rate monitoring best practices"}),
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::WebSearch {
+                query: "rust error rate monitoring best practices".to_string(),
+            },
+            result_hint: Some(ToolResultHint::Plain(
+                "1. Monitoring in Rust - https://docs.rs/metrics/\n2. Error Handling Patterns - https://blog.rust-lang.org/".to_string(),
+            )),
+        }),
+    );
+    // A running tool
+    transcript.push(
+        ChatRole::Assistant,
+        ChatMessagePayload::ToolCall(ToolCall {
+            name: "execute_command".to_string(),
+            arguments: serde_json::json!({"command": "cargo test --workspace"}),
+            status: ToolCallStatus::Running,
+            hint: ToolCallHint::Shell {
+                command: "cargo test --workspace".to_string(),
+                working_dir: None,
+            },
+            result_hint: None,
+        }),
+    );
+    // A generic/other tool (backward compat demo)
     transcript.push(
         ChatRole::Assistant,
         ChatMessagePayload::ToolCall(ToolCall {
             name: "fetch_report".to_string(),
             arguments: serde_json::json!({"source": "telemetry", "period": "24h"}),
-            status: ToolCallStatus::Running,
+            status: ToolCallStatus::Completed,
+            hint: ToolCallHint::Other,
+            result_hint: None,
         }),
     );
     transcript.push(
@@ -1697,6 +2237,8 @@ mod tests {
                 name: "lookup".to_string(),
                 arguments: serde_json::json!({"q": "status"}),
                 status: ToolCallStatus::Completed,
+                hint: ToolCallHint::Other,
+                result_hint: None,
             }),
         );
         transcript.push(
