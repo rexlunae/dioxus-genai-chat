@@ -1331,6 +1331,19 @@ fn diff_sign(kind: DiffKind) -> &'static str {
 
 // ── Tool call panel ─────────────────────────────────────────────────────────
 
+/// Truncate a string to at most `max_bytes` bytes without splitting a
+/// multi-byte UTF-8 character.  Appends `…` when truncation occurs.
+fn truncate_str(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let end = (0..=max_bytes)
+        .rev()
+        .find(|&i| s.is_char_boundary(i))
+        .unwrap_or(0);
+    format!("{}…", &s[..end])
+}
+
 fn tool_hint_icon(hint: &ToolCallHint) -> &'static str {
     match hint {
         ToolCallHint::FileRead { .. } => "📄",
@@ -1361,11 +1374,7 @@ fn tool_hint_summary(name: &str, hint: &ToolCallHint) -> (String, Option<String>
         }
         ToolCallHint::FileEdit { path } => (format!("{name} \u{00b7} {path}"), None),
         ToolCallHint::Shell { command, .. } => {
-            let cmd = if command.len() > 60 {
-                format!("{}…", &command[..60])
-            } else {
-                command.clone()
-            };
+            let cmd = truncate_str(command, 60);
             (format!("{name} \u{00b7} {cmd}"), None)
         }
         ToolCallHint::Search { pattern, path } => {
@@ -1388,11 +1397,7 @@ fn tool_hint_summary(name: &str, hint: &ToolCallHint) -> (String, Option<String>
         }
         ToolCallHint::WebSearch { query } => (format!("{name} \u{00b7} \"{query}\""), None),
         ToolCallHint::WebFetch { url } => {
-            let display = if url.len() > 60 {
-                format!("{}…", &url[..60])
-            } else {
-                url.clone()
-            };
+            let display = truncate_str(url, 60);
             (format!("{name} \u{00b7} {display}"), None)
         }
         ToolCallHint::Memory { action } => (format!("{name} \u{00b7} {action}"), None),
@@ -1625,11 +1630,7 @@ struct ToolResultPanelProps {
 #[component]
 fn ToolResultPanel(props: ToolResultPanelProps) -> Element {
     let content = &props.content;
-    let truncated = if content.len() > 500 {
-        format!("{}…", &content[..500])
-    } else {
-        content.clone()
-    };
+    let truncated = truncate_str(content, 500);
     rsx! {
         details {
             class: "gc-tool",
